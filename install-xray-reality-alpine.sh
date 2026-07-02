@@ -612,24 +612,69 @@ restart_xray() {
   ok "Xray 已重启。"
 }
 
-modify_node() {
-  load_state
-  OLD_PORT="$PORT"
-  echo
-  echo "当前配置："
-  echo "  端口：${PORT}"
-  echo "  SNI： ${SNI}"
-  echo "  名称：${TAG}"
-  echo
-  prompt_port "$PORT"
-  prompt_sni "$SNI"
-  prompt_tag "$TAG"
-  check_port_available "$OLD_PORT"
+apply_config() {
   write_config
   restart_xray
   detect_server_addr
   save_state
   show_node
+}
+
+modify_port_only() {
+  load_state
+  OLD_PORT="$PORT"
+  echo
+  echo "当前端口：${PORT}"
+  prompt_port "$PORT"
+  check_port_available "$OLD_PORT"
+  apply_config
+}
+
+modify_sni_only() {
+  load_state
+  echo
+  echo "当前 SNI：${SNI}"
+  prompt_sni "$SNI"
+  apply_config
+}
+
+modify_tag_only() {
+  load_state
+  echo
+  echo "当前节点名称：${TAG}"
+  prompt_tag "$TAG"
+  apply_config
+}
+
+regenerate_values() {
+  UUID="$("$XRAY_BIN" uuid)"
+  KEYS="$("$XRAY_BIN" x25519 2>&1)"
+  PRIVATE_KEY="$(printf "%s\n" "$KEYS" | awk '{line=tolower($0); if (line ~ /private/ && line ~ /key/) {sub(/.*[:=][ \t]*/, "", $0); gsub(/[",]/, "", $0); print $1; exit}}')"
+  PUBLIC_KEY="$(printf "%s\n" "$KEYS" | awk '{line=tolower($0); if (line ~ /public/ && line ~ /key/) {sub(/.*[:=][ \t]*/, "", $0); gsub(/[",]/, "", $0); print $1; exit}}')"
+  SHORT_ID="$(openssl rand -hex 8)"
+
+  [ -n "$UUID" ] || fail "生成 UUID 失败。"
+  if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
+    warn "无法解析 xray x25519 输出："
+    printf "%s\n" "$KEYS"
+  fi
+  [ -n "$PRIVATE_KEY" ] || fail "生成 REALITY 私钥失败。"
+  [ -n "$PUBLIC_KEY" ] || fail "生成 REALITY 公钥失败。"
+  [ -n "$SHORT_ID" ] || fail "生成 shortId 失败。"
+}
+
+reset_current_node() {
+  load_state
+  echo
+  warn "将重新生成 UUID、REALITY 密钥和 shortId，旧客户端链接会失效。"
+  printf "确认重置当前节点？[y/N]: "
+  read -r CONFIRM
+  case "$CONFIRM" in
+    y|Y|yes|YES) ;;
+    *) fail "已取消重置。" ;;
+  esac
+  regenerate_values
+  apply_config
 }
 
 service_status() {
@@ -671,11 +716,14 @@ show_menu() {
   echo " VLESS + Reality 管理面板"
   echo "=============================="
   echo " 1. 查看节点链接"
-  echo " 2. 修改端口 / SNI / 节点名称"
-  echo " 3. 重启 Xray"
-  echo " 4. 查看服务状态"
-  echo " 5. 查看日志"
-  echo " 6. 卸载并清理环境"
+  echo " 2. 修改端口"
+  echo " 3. 修改 SNI"
+  echo " 4. 修改节点名称"
+  echo " 5. 重启 Xray"
+  echo " 6. 查看服务状态"
+  echo " 7. 查看日志"
+  echo " 8. 重置当前节点"
+  echo " 9. 卸载并清理环境"
   echo " 0. 退出"
   echo
   printf "请选择操作: "
@@ -688,11 +736,14 @@ main() {
     read -r CHOICE
     case "$CHOICE" in
       1) show_node ;;
-      2) modify_node ;;
-      3) load_state; restart_xray ;;
-      4) service_status ;;
-      5) show_logs ;;
-      6) uninstall_xray; exit 0 ;;
+      2) modify_port_only ;;
+      3) modify_sni_only ;;
+      4) modify_tag_only ;;
+      5) load_state; restart_xray ;;
+      6) service_status ;;
+      7) show_logs ;;
+      8) reset_current_node ;;
+      9) uninstall_xray; exit 0 ;;
       0) exit 0 ;;
       *) echo "无效选择，请重新输入。" ;;
     esac
