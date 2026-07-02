@@ -762,31 +762,31 @@ print_result() {
   URI="vless://${UUID}@${SERVER_ADDR}:${PORT}?type=tcp&encryption=none&security=reality&pbk=${PUBLIC_KEY}&fp=${FINGERPRINT}&sni=${SNI}&sid=${SHORT_ID}&spx=${SPIDERX}&flow=xtls-rprx-vision#${TAG}"
 
   echo
-  echo "Xray VLESS + Vision + REALITY installation completed."
+  echo "Xray VLESS + Vision + REALITY 安装完成。"
   echo
-  echo "Server:    ${SERVER_ADDR}"
-  echo "Port:      ${PORT}"
-  echo "UUID:      ${UUID}"
-  echo "PublicKey: ${PUBLIC_KEY}"
-  echo "ShortId:   ${SHORT_ID}"
-  echo "SNI:       ${SNI}"
-  echo "Name:      ${TAG}"
+  echo "服务器地址：${SERVER_ADDR}"
+  echo "监听端口：  ${PORT}"
+  echo "UUID：      ${UUID}"
+  echo "PublicKey： ${PUBLIC_KEY}"
+  echo "ShortId：   ${SHORT_ID}"
+  echo "SNI：       ${SNI}"
+  echo "节点名称：  ${TAG}"
   echo
-  echo "Client URL:"
+  echo "客户端链接："
   echo "${URI}"
   echo
-  echo "Config:  ${CONFIG_FILE}"
-  echo "Service: ${SERVICE_FILE}"
-  echo "Panel:   vvr"
+  echo "配置文件：${CONFIG_FILE}"
+  echo "服务文件：${SERVICE_FILE}"
+  echo "管理面板：vvr"
   echo
-  echo "Management commands:"
-  echo "  Panel:   vvr"
-  echo "  Start:   rc-service xray start"
-  echo "  Stop:    rc-service xray stop"
-  echo "  Restart: rc-service xray restart"
-  echo "  Status:  rc-service xray status"
-  echo "  Log:     tail -f ${LOG_FILE}"
-  echo "  Error:   tail -f ${ERR_LOG_FILE}"
+  echo "常用管理命令："
+  echo "  管理面板：vvr"
+  echo "  启动服务：rc-service xray start"
+  echo "  停止服务：rc-service xray stop"
+  echo "  重启服务：rc-service xray restart"
+  echo "  查看状态：rc-service xray status"
+  echo "  运行日志：tail -f ${LOG_FILE}"
+  echo "  错误日志：tail -f ${ERR_LOG_FILE}"
 }
 
 cleanup() {
