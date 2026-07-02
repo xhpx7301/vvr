@@ -97,7 +97,7 @@ make_default_tag() {
   if [ -z "$RANDOM_SUFFIX" ]; then
     RANDOM_SUFFIX="ABCDEF"
   fi
-  DEFAULT_TAG="VRL${RANDOM_SUFFIX}"
+  DEFAULT_TAG="vvr-${RANDOM_SUFFIX}"
 }
 
 prompt_node_name() {
@@ -519,7 +519,7 @@ prompt_sni() {
 make_default_tag() {
   RANDOM_SUFFIX="$(LC_ALL=C tr -dc 'A-Za-z' < /dev/urandom | head -c 6)"
   [ -n "$RANDOM_SUFFIX" ] || RANDOM_SUFFIX="ABCDEF"
-  DEFAULT_TAG="VRL${RANDOM_SUFFIX}"
+  DEFAULT_TAG="vvr-${RANDOM_SUFFIX}"
 }
 
 prompt_tag() {
