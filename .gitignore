@@ -1,0 +1,8 @@
+.env
+*.local
+config.json
+node.txt
+result.txt
+*.key
+id_ed25519
+id_ed25519.pub
