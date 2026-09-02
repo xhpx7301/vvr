@@ -1,5 +1,5 @@
-#!/usr/bin/env bash
-set -Eeuo pipefail
+#!/usr/bin/env sh
+set -eu
 
 # Debian installer for VLESS + REALITY with IPv4/IPv6 YouTube split routing.
 
@@ -22,11 +22,11 @@ RED=""
 GREEN=""
 RESET=""
 if [ -t 1 ]; then
-  BLUE=$'\033[1;34m'
-  YELLOW=$'\033[1;33m'
-  RED=$'\033[1;31m'
-  GREEN=$'\033[1;32m'
-  RESET=$'\033[0m'
+  BLUE="$(printf '\033[1;34m')"
+  YELLOW="$(printf '\033[1;33m')"
+  RED="$(printf '\033[1;31m')"
+  GREEN="$(printf '\033[1;32m')"
+  RESET="$(printf '\033[0m')"
 fi
 
 info() { printf '%s\n' "${BLUE}INFO${RESET} $*"; }
@@ -39,7 +39,7 @@ cleanup() {
     rm -rf "${TMP_DIR}"
   fi
 }
-trap cleanup EXIT
+trap cleanup 0
 
 need_root() {
   [ "$(id -u)" -eq 0 ] || fail "请使用 root 运行此脚本。"
@@ -95,12 +95,17 @@ prompt_values() {
   printf '监听端口 [%s]: ' "${DEFAULT_PORT}"
   read -r input
   PORT="${input:-${DEFAULT_PORT}}"
-  [[ "${PORT}" =~ ^[0-9]+$ ]] && [ "${PORT}" -ge 1 ] && [ "${PORT}" -le 65535 ] || fail "端口无效。"
+  case "${PORT}" in
+    ''|*[!0-9]*) fail "端口无效。" ;;
+  esac
+  [ "${PORT}" -ge 1 ] && [ "${PORT}" -le 65535 ] || fail "端口无效。"
 
   printf 'Reality SNI [%s]: ' "${DEFAULT_SNI}"
   read -r input
   SNI="${input:-${DEFAULT_SNI}}"
-  [[ "${SNI}" =~ ^[A-Za-z0-9.-]+$ ]] || fail "SNI 格式无效。"
+  case "${SNI}" in
+    ''|*[!A-Za-z0-9.-]*) fail "SNI 格式无效。" ;;
+  esac
 
   printf '节点名称 [%s]: ' "${DEFAULT_TAG}"
   read -r input
