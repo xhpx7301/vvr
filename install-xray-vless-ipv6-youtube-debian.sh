@@ -32,6 +32,8 @@ DEFAULT_LIMIT_UPLOAD_BURST="131072"
 DEFAULT_LIMIT_DOWNLOAD_BPS="131072"
 DEFAULT_LIMIT_DOWNLOAD_BURST="262144"
 DEFAULT_BASE_OUTBOUND_MODE="ipv4"
+DEFAULT_INBOUND_MODE="ipv4"
+HAPPY_EYEBALLS_DELAY_MS="100"
 FINGERPRINT="chrome"
 
 BLUE=""
@@ -134,7 +136,48 @@ prompt_values() {
 
   SERVER_IPV4="$(curl -4 -fsS --max-time 8 https://api.ipify.org 2>/dev/null || true)"
   SERVER_IPV6="$(curl -6 -fsS --max-time 8 https://api64.ipify.org 2>/dev/null || true)"
+  prompt_inbound_mode
   confirm_initial_base_outbound
+}
+
+prompt_inbound_mode() {
+  local input
+  echo
+  echo "节点入口协议（客户端连接到此协议的服务器地址）："
+  echo "  1. IPv4（监听 0.0.0.0）"
+  echo "  2. IPv6（监听 ::）"
+  printf '选择节点入口 [1]: '
+  read -r input
+  case "${input:-1}" in
+    1) INBOUND_MODE="ipv4" ;;
+    2) INBOUND_MODE="ipv6" ;;
+    *) fail "无效的节点入口选择。" ;;
+  esac
+
+  case "${INBOUND_MODE}" in
+    ipv4)
+      case "${SERVER_IPV4}" in
+        *.*.*.*) ;;
+        *)
+          warn "当前检测不到公网 IPv4；IPv4 入口生成的链接可能无法连接。"
+          printf '仍要继续使用 IPv4 入口吗？[y/N]: '
+          read -r input
+          case "${input}" in y|Y|yes|YES) ;; *) fail "已取消，请选择 IPv6 入口或检查网络。" ;; esac
+          ;;
+      esac
+      ;;
+    ipv6)
+      case "${SERVER_IPV6}" in
+        *:*) ;;
+        *)
+          warn "当前检测不到公网 IPv6；IPv6 入口生成的链接可能无法连接。"
+          printf '仍要继续使用 IPv6 入口吗？[y/N]: '
+          read -r input
+          case "${input}" in y|Y|yes|YES) ;; *) fail "已取消，请选择 IPv4 入口或检查网络。" ;; esac
+          ;;
+      esac
+      ;;
+  esac
 }
 
 confirm_initial_base_outbound() {
@@ -168,7 +211,14 @@ confirm_initial_base_outbound() {
     ipv4v6)
       case "${SERVER_IPV4}" in *.*.*.*) ;; *) warn "IPv4 当前不可用，IPv4 优先基础模式将使用 IPv6 兜底。" ;; esac
       ;;
+    happy4v6)
+      case "${SERVER_IPV4}" in *.*.*.*) ;; *) warn "IPv4 当前不可用，IPv4 优先连接竞速将由 IPv6 接管。" ;; esac
+      ;;
+    happy6v4)
+      case "${SERVER_IPV6}" in *:*) ;; *) warn "IPv6 当前不可用，IPv6 优先连接竞速将由 IPv4 接管。" ;; esac
+      ;;
   esac
+
 }
 
 prompt_base_outbound_mode() {
@@ -180,6 +230,8 @@ prompt_base_outbound_mode() {
   echo "  2. 仅 IPv6"
   echo "  3. IPv4 优先，IPv6 兜底"
   echo "  4. IPv6 优先，IPv4 兜底"
+  echo "  5. IPv4 优先连接竞速（Happy Eyeballs）"
+  echo "  6. IPv6 优先连接竞速（Happy Eyeballs）"
   printf '选择基础出站模式 [1]: '
   read -r input
   case "${input:-1}" in
@@ -187,6 +239,8 @@ prompt_base_outbound_mode() {
     2) BASE_OUTBOUND_MODE="ipv6" ;;
     3) BASE_OUTBOUND_MODE="ipv4v6" ;;
     4) BASE_OUTBOUND_MODE="ipv6v4" ;;
+    5) BASE_OUTBOUND_MODE="happy4v6" ;;
+    6) BASE_OUTBOUND_MODE="happy6v4" ;;
     *) fail "无效的基础出站模式。" ;;
   esac
 }
@@ -359,6 +413,8 @@ write_config() {
       ipv6) route_tag="direct-ipv6" ;;
       ipv4v6) route_tag="direct-ipv4v6" ;;
       ipv6v4) route_tag="direct-ipv6v4" ;;
+      happy4v6) route_tag="direct-happy-ipv4v6" ;;
+      happy6v4) route_tag="direct-happy-ipv6v4" ;;
       *) continue ;;
     esac
     case "${route_type}" in
@@ -376,7 +432,15 @@ write_config() {
     ipv6) BASE_OUTBOUND_TAG="direct-ipv6" ;;
     ipv4v6) BASE_OUTBOUND_TAG="direct-ipv4v6" ;;
     ipv6v4) BASE_OUTBOUND_TAG="direct-ipv6v4" ;;
+    happy4v6) BASE_OUTBOUND_TAG="direct-happy-ipv4v6" ;;
+    happy6v4) BASE_OUTBOUND_TAG="direct-happy-ipv6v4" ;;
     *) fail "基础出站模式无效。" ;;
+  esac
+
+  case "${INBOUND_MODE}" in
+    ipv4) INBOUND_LISTEN="0.0.0.0" ;;
+    ipv6) INBOUND_LISTEN="::" ;;
+    *) fail "节点入口模式无效。" ;;
   esac
 
   if [ "${FALLBACK_MODE}" = "protected" ]; then
@@ -456,7 +520,7 @@ write_config() {
   },
   "inbounds": [
     {
-      "listen": "0.0.0.0",
+      "listen": "${INBOUND_LISTEN}",
       "port": ${PORT},
       "protocol": "vless",
       "tag": "vless-in",
@@ -526,6 +590,36 @@ write_config() {
       }
     },
     {
+      "protocol": "freedom",
+      "tag": "direct-happy-ipv4v6",
+      "settings": {
+        "domainStrategy": "UseIPv4v6"
+      },
+      "streamSettings": {
+        "sockopt": {
+          "happyEyeballs": {
+            "tryDelayMs": ${HAPPY_EYEBALLS_DELAY_MS},
+            "prioritizeIPv6": false
+          }
+        }
+      }
+    },
+    {
+      "protocol": "freedom",
+      "tag": "direct-happy-ipv6v4",
+      "settings": {
+        "domainStrategy": "UseIPv6v4"
+      },
+      "streamSettings": {
+        "sockopt": {
+          "happyEyeballs": {
+            "tryDelayMs": ${HAPPY_EYEBALLS_DELAY_MS},
+            "prioritizeIPv6": true
+          }
+        }
+      }
+    },
+    {
       "protocol": "blackhole",
       "tag": "block"
     },
@@ -579,6 +673,8 @@ FALLBACK_LIMIT_UPLOAD_BURST='${FALLBACK_LIMIT_UPLOAD_BURST}'
 FALLBACK_LIMIT_DOWNLOAD_BPS='${FALLBACK_LIMIT_DOWNLOAD_BPS}'
 FALLBACK_LIMIT_DOWNLOAD_BURST='${FALLBACK_LIMIT_DOWNLOAD_BURST}'
 BASE_OUTBOUND_MODE='${BASE_OUTBOUND_MODE}'
+INBOUND_MODE='${INBOUND_MODE}'
+HAPPY_EYEBALLS_DELAY_MS='${HAPPY_EYEBALLS_DELAY_MS}'
 SERVER_IPV4='${SERVER_IPV4}'
 SERVER_IPV6='${SERVER_IPV6}'
 EOF
@@ -731,21 +827,87 @@ def read_token():
         return ""
 
 class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        query = parse_qs(urlparse(self.path).query)
+    def _authorized(self, query):
         token = read_token()
-        if token and query.get("token", [""])[0] != token:
+        if not token:
+            return True
+
+        # MiSub uses the same Bearer-token convention as 3X-UI. Keep the
+        # query-token form for the existing VVR CLI and older integrations.
+        authorization = self.headers.get("Authorization", "")
+        bearer = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
+        supplied = bearer or query.get("token", [""])[0]
+        if supplied != token:
             self.send_error(403, "invalid token")
-            return
-        if urlparse(self.path).path not in ("/", "/api/traffic"):
-            self.send_error(404)
-            return
-        body = json.dumps(collect(), ensure_ascii=False).encode()
-        self.send_response(200)
+            return False
+        return True
+
+    def _write_json(self, payload, status=200):
+        body = json.dumps(payload, ensure_ascii=False).encode()
+        self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _traffic_payload(self):
+        return collect()
+
+    def _xui_inbounds_payload(self):
+        traffic = self._traffic_payload()
+        # MiSub consumes the standard 3X-UI inbound list shape. VVR has one
+        # logical inbound, so expose its monthly aggregate as inbound id 1.
+        return {
+            "success": True,
+            "obj": [{
+                "id": 1,
+                "remark": os.environ.get("VVR_INBOUND_REMARK", "vvr-vless-ipv6-youtube"),
+                "tag": "vless-in",
+                "protocol": "vless",
+                "up": int(traffic.get("up", 0)),
+                "down": int(traffic.get("down", 0)),
+                "total": int(traffic.get("total", 0)),
+                "enable": True
+            }]
+        }
+
+    def do_GET(self):
+        query = parse_qs(urlparse(self.path).query)
+        if not self._authorized(query):
+            return
+        path = urlparse(self.path).path.rstrip("/") or "/"
+        if path in ("/", "/api/traffic"):
+            self._write_json(self._traffic_payload())
+            return
+        if path == "/panel/api/inbounds/list":
+            self._write_json(self._xui_inbounds_payload())
+            return
+        self.send_error(404)
+
+    def do_POST(self):
+        query = parse_qs(urlparse(self.path).query)
+        if not self._authorized(query):
+            return
+        path = urlparse(self.path).path.rstrip("/") or "/"
+        if path in ("/panel/api/inbounds/resetAllTraffics", "/api/traffic/reset"):
+            try:
+                result = reset()
+            except Exception as error:
+                self._write_json({"success": False, "msg": str(error)}, status=503)
+                return
+            self._write_json({"success": True, "obj": result})
+            return
+        self.send_error(404)
+
+    def do_OPTIONS(self):
+        # Useful when the service is placed behind a browser-facing reverse
+        # proxy; server-to-server MiSub requests do not rely on CORS.
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.end_headers()
+
     def log_message(self, *_):
         return
 
@@ -900,6 +1062,8 @@ DEFAULT_LIMIT_UPLOAD_BURST="131072"
 DEFAULT_LIMIT_DOWNLOAD_BPS="131072"
 DEFAULT_LIMIT_DOWNLOAD_BURST="262144"
 DEFAULT_BASE_OUTBOUND_MODE="ipv4"
+DEFAULT_INBOUND_MODE="ipv4"
+HAPPY_EYEBALLS_DELAY_MS="100"
 FINGERPRINT="chrome"
 
 if [ -t 1 ]; then
@@ -940,6 +1104,18 @@ load_state() {
   FALLBACK_LIMIT_DOWNLOAD_BPS="${FALLBACK_LIMIT_DOWNLOAD_BPS:-}"
   FALLBACK_LIMIT_DOWNLOAD_BURST="${FALLBACK_LIMIT_DOWNLOAD_BURST:-}"
   BASE_OUTBOUND_MODE="${BASE_OUTBOUND_MODE:-${DEFAULT_BASE_OUTBOUND_MODE}}"
+  INBOUND_MODE="${INBOUND_MODE:-${DEFAULT_INBOUND_MODE}}"
+  HAPPY_EYEBALLS_DELAY_MS="${HAPPY_EYEBALLS_DELAY_MS:-100}"
+  case "${INBOUND_MODE}" in
+    ipv4|ipv6) ;;
+    *) INBOUND_MODE="${DEFAULT_INBOUND_MODE}" ;;
+  esac
+  case "${HAPPY_EYEBALLS_DELAY_MS}" in
+    ''|*[!0-9]*) HAPPY_EYEBALLS_DELAY_MS="100" ;;
+  esac
+  if [ "${HAPPY_EYEBALLS_DELAY_MS}" -lt 25 ] || [ "${HAPPY_EYEBALLS_DELAY_MS}" -gt 2000 ]; then
+    HAPPY_EYEBALLS_DELAY_MS="100"
+  fi
   if [ "${FALLBACK_MODE}" = "protected" ]; then
     FALLBACK_PORT="${FALLBACK_PORT:-${DEFAULT_FALLBACK_PORT}}"
     REALITY_DEST="127.0.0.1:${FALLBACK_PORT}"
@@ -974,6 +1150,8 @@ FALLBACK_LIMIT_UPLOAD_BURST='${FALLBACK_LIMIT_UPLOAD_BURST}'
 FALLBACK_LIMIT_DOWNLOAD_BPS='${FALLBACK_LIMIT_DOWNLOAD_BPS}'
 FALLBACK_LIMIT_DOWNLOAD_BURST='${FALLBACK_LIMIT_DOWNLOAD_BURST}'
 BASE_OUTBOUND_MODE='${BASE_OUTBOUND_MODE}'
+INBOUND_MODE='${INBOUND_MODE}'
+HAPPY_EYEBALLS_DELAY_MS='${HAPPY_EYEBALLS_DELAY_MS}'
 SERVER_IPV4='${SERVER_IPV4:-}'
 SERVER_IPV6='${SERVER_IPV6:-}'
 STATE
@@ -1039,6 +1217,8 @@ outbound_tag_for_mode() {
     ipv6) printf '%s' 'direct-ipv6' ;;
     ipv4v6) printf '%s' 'direct-ipv4v6' ;;
     ipv6v4) printf '%s' 'direct-ipv6v4' ;;
+    happy4v6) printf '%s' 'direct-happy-ipv4v6' ;;
+    happy6v4) printf '%s' 'direct-happy-ipv6v4' ;;
     *) return 1 ;;
   esac
 }
@@ -1069,17 +1249,24 @@ warn_unavailable_outbound_mode() {
     ipv4v6)
       [ "${IPV4_STATUS}" != "unavailable" ] || warn "IPv4 当前不可用，IPv4 优先模式会自动使用 IPv6 兜底。"
       ;;
+    happy4v6)
+      [ "${IPV4_STATUS}" != "unavailable" ] || warn "IPv4 当前不可用，IPv4 优先连接竞速会由 IPv6 接管。"
+      ;;
+    happy6v4)
+      [ "${IPV6_STATUS}" != "unavailable" ] || warn "IPv6 当前不可用，IPv6 优先连接竞速会由 IPv4 接管。"
+      ;;
   esac
 }
 
 make_uri() {
-  if [ -n "${SERVER_IPV4:-}" ]; then
-    host="${SERVER_IPV4}"
-  elif [ -n "${SERVER_IPV6:-}" ]; then
-    host="[${SERVER_IPV6}]"
-  else
-    host="你的服务器地址"
-  fi
+  case "${INBOUND_MODE}" in
+    ipv6)
+      if [ -n "${SERVER_IPV6:-}" ]; then host="[${SERVER_IPV6}]"; else host="[你的服务器IPv6地址]"; fi
+      ;;
+    *)
+      if [ -n "${SERVER_IPV4:-}" ]; then host="${SERVER_IPV4}"; else host="你的服务器IPv4地址"; fi
+      ;;
+  esac
   URI="vless://${UUID}@${host}:${PORT}?type=tcp&encryption=none&security=reality&pbk=${PUBLIC_KEY}&fp=${FINGERPRINT}&sni=${SNI}&sid=${SHORT_ID}&spx=%2F&flow=xtls-rprx-vision#${TAG}"
 }
 
@@ -1089,6 +1276,7 @@ show_node() {
   echo
   echo "节点信息："
   echo "  服务器：${host}"
+  case "${INBOUND_MODE}" in ipv6) echo "  入口：  IPv6（::）" ;; *) echo "  入口：  IPv4（0.0.0.0）" ;; esac
   echo "  端口：  ${PORT}"
   echo "  SNI：   ${SNI}"
   echo "  名称：  ${TAG}"
@@ -1289,6 +1477,8 @@ outbound_mode_label() {
     ipv6) printf '%s' '仅 IPv6' ;;
     ipv4v6) printf '%s' 'IPv4 优先，IPv6 兜底' ;;
     ipv6v4) printf '%s' 'IPv6 优先，IPv4 兜底' ;;
+    happy4v6) printf '%s' 'IPv4 优先连接竞速' ;;
+    happy6v4) printf '%s' 'IPv6 优先连接竞速' ;;
     *) printf '%s' '未知' ;;
   esac
 }
@@ -1300,12 +1490,16 @@ choose_outbound_mode() {
   echo "  2. 仅 IPv6"
   echo "  3. IPv4 优先，IPv6 兜底"
   echo "  4. IPv6 优先，IPv4 兜底"
+  echo "  5. IPv4 优先连接竞速（Happy Eyeballs）"
+  echo "  6. IPv6 优先连接竞速（Happy Eyeballs）"
   echo "  0. 返回上一级"
   case "${default}" in
     ipv4) default=1 ;;
     ipv6) default=2 ;;
     ipv4v6) default=3 ;;
     ipv6v4) default=4 ;;
+    happy4v6) default=5 ;;
+    happy6v4) default=6 ;;
     *) default=1 ;;
   esac
   printf '选择出站模式 [%s]: ' "${default}"
@@ -1316,9 +1510,33 @@ choose_outbound_mode() {
     2) SELECTED_OUTBOUND_MODE="ipv6" ;;
     3) SELECTED_OUTBOUND_MODE="ipv4v6" ;;
     4) SELECTED_OUTBOUND_MODE="ipv6v4" ;;
+    5) SELECTED_OUTBOUND_MODE="happy4v6" ;;
+    6) SELECTED_OUTBOUND_MODE="happy6v4" ;;
     *) fail "无效的出站模式。" ;;
   esac
   warn_unavailable_outbound_mode "${SELECTED_OUTBOUND_MODE}"
+}
+
+configure_happy_eyeballs_delay() {
+  local input
+  MENU_CHANGED=0
+  while :; do
+    printf '连接竞速延迟（毫秒，25-2000；输入 0 返回）[%s]: ' "${HAPPY_EYEBALLS_DELAY_MS}"
+    read -r input
+    [ "${input}" = "0" ] && return
+    input="${input:-${HAPPY_EYEBALLS_DELAY_MS}}"
+    case "${input}" in
+      ''|*[!0-9]*) echo "请输入 25 到 2000 的整数。"; continue ;;
+    esac
+    if [ "${input}" -lt 25 ] || [ "${input}" -gt 2000 ]; then
+      echo "延迟必须在 25 到 2000 毫秒之间。"
+      continue
+    fi
+    HAPPY_EYEBALLS_DELAY_MS="${input}"
+    MENU_CHANGED=1
+    ok "连接竞速延迟已设置为 ${HAPPY_EYEBALLS_DELAY_MS}ms。"
+    return
+  done
 }
 
 ensure_routes_file() {
@@ -1440,6 +1658,7 @@ manage_outbound_strategy() {
     echo " 出站策略管理"
     echo "=============================="
     echo " 当前基础出站：$(outbound_mode_label "${BASE_OUTBOUND_MODE}")"
+    echo " 连接竞速延迟：${HAPPY_EYEBALLS_DELAY_MS}ms（仅第 5/6 类策略生效）"
     show_network_status
     echo " 1. 设置基础出站模式"
     echo " 2. 查看全部出站规则"
@@ -1447,6 +1666,7 @@ manage_outbound_strategy() {
     echo " 4. 添加 geosite 规则"
     echo " 5. 删除规则"
     echo " 6. 测试网络与出站规则"
+    echo " 7. 设置连接竞速延迟"
     echo " 0. 返回主菜单"
     echo
     printf '请选择操作: '
@@ -1470,6 +1690,11 @@ manage_outbound_strategy() {
           continue
         fi
         ;;
+      7)
+        configure_happy_eyeballs_delay
+        [ "${MENU_CHANGED}" -eq 1 ] || continue
+        apply_config
+        ;;
       0) return ;;
       *) echo "无效选择，请重新输入。" ;;
     esac
@@ -1489,11 +1714,14 @@ build_test_routing_rules() {
     [ -n "${route_mode}" ] || continue
     TEST_ROUTE_NUMBER=$((TEST_ROUTE_NUMBER + 1))
     route_strategy=""
+    route_sockopt=""
     case "${route_mode}" in
       ipv4) route_strategy="UseIPv4" ;;
       ipv6) route_strategy="UseIPv6" ;;
       ipv4v6) route_strategy="UseIPv4v6" ;;
       ipv6v4) route_strategy="UseIPv6v4" ;;
+      happy4v6) route_strategy="UseIPv4v6"; route_sockopt=", \"streamSettings\": {\"sockopt\": {\"happyEyeballs\": {\"tryDelayMs\": ${HAPPY_EYEBALLS_DELAY_MS}, \"prioritizeIPv6\": false}}}" ;;
+      happy6v4) route_strategy="UseIPv6v4"; route_sockopt=", \"streamSettings\": {\"sockopt\": {\"happyEyeballs\": {\"tryDelayMs\": ${HAPPY_EYEBALLS_DELAY_MS}, \"prioritizeIPv6\": true}}}" ;;
       *) continue ;;
     esac
     case "${route_type}" in
@@ -1503,7 +1731,7 @@ build_test_routing_rules() {
     esac
     [ -n "${route_domain}" ] || continue
     route_tag="test-rule-${TEST_ROUTE_NUMBER}"
-    TEST_RULE_OUTBOUNDS="${TEST_RULE_OUTBOUNDS}    {\"protocol\": \"freedom\", \"tag\": \"${route_tag}\", \"settings\": {\"domainStrategy\": \"${route_strategy}\"}},
+    TEST_RULE_OUTBOUNDS="${TEST_RULE_OUTBOUNDS}    {\"protocol\": \"freedom\", \"tag\": \"${route_tag}\", \"settings\": {\"domainStrategy\": \"${route_strategy}\"}${route_sockopt:-}},
 "
     TEST_RULE_DESCRIPTIONS="${TEST_RULE_DESCRIPTIONS}${route_tag}|${route_mode}|${route_type}|${route_value}
 "
@@ -1624,7 +1852,7 @@ cleanup_rule_test() {
 write_rule_test_config() {
   build_test_routing_rules
   case "${BASE_OUTBOUND_MODE}" in
-    ipv4|ipv6|ipv4v6|ipv6v4) TEST_BASE_TAG="$(outbound_tag_for_mode "${BASE_OUTBOUND_MODE}")" ;;
+    ipv4|ipv6|ipv4v6|ipv6v4|happy4v6|happy6v4) TEST_BASE_TAG="$(outbound_tag_for_mode "${BASE_OUTBOUND_MODE}")" ;;
     *) fail "基础出站模式无效。" ;;
   esac
   cat > "${TEST_CONFIG}" <<CONFIG
@@ -1648,6 +1876,8 @@ write_rule_test_config() {
     {"protocol": "freedom", "tag": "direct-ipv6", "settings": {"domainStrategy": "UseIPv6"}},
     {"protocol": "freedom", "tag": "direct-ipv4v6", "settings": {"domainStrategy": "UseIPv4v6"}},
     {"protocol": "freedom", "tag": "direct-ipv6v4", "settings": {"domainStrategy": "UseIPv6v4"}},
+    {"protocol": "freedom", "tag": "direct-happy-ipv4v6", "settings": {"domainStrategy": "UseIPv4v6"}, "streamSettings": {"sockopt": {"happyEyeballs": {"tryDelayMs": ${HAPPY_EYEBALLS_DELAY_MS}, "prioritizeIPv6": false}}}},
+    {"protocol": "freedom", "tag": "direct-happy-ipv6v4", "settings": {"domainStrategy": "UseIPv6v4"}, "streamSettings": {"sockopt": {"happyEyeballs": {"tryDelayMs": ${HAPPY_EYEBALLS_DELAY_MS}, "prioritizeIPv6": true}}}},
 ${TEST_RULE_OUTBOUNDS}
     {"protocol": "blackhole", "tag": "block"}
   ],
@@ -2085,6 +2315,19 @@ traffic_api_endpoint() {
   fi
 }
 
+traffic_xui_endpoint() {
+  load_traffic_api_settings
+  if [ "${TRAFFIC_API_HOST}" = "0.0.0.0" ]; then
+    if [ -n "${SERVER_IPV4:-}" ]; then
+      printf 'http://%s:18080/panel/api/inbounds/list' "${SERVER_IPV4}"
+    else
+      printf 'http://服务器IPv4地址:18080/panel/api/inbounds/list'
+    fi
+  else
+    printf 'http://127.0.0.1:18080/panel/api/inbounds/list'
+  fi
+}
+
 configure_traffic_api() {
   local input answer host
   MENU_RETURNED=0
@@ -2254,7 +2497,10 @@ manage_traffic() {
         load_traffic_api_settings
         echo "监听地址：${TRAFFIC_API_HOST}:18080"
         echo "接口：$(traffic_api_endpoint)"
+        echo "MiSub 3X-UI 兼容接口：$(traffic_xui_endpoint)"
         echo "令牌：$(cat "${CONFIG_DIR}/vvr-traffic.token" 2>/dev/null || echo '未生成')"
+        echo "认证方式：Authorization: Bearer <令牌>（旧接口仍支持 ?token=<令牌>）"
+        echo "入站 ID：1（MiSub 面板配置可留空，或填写 1）"
         echo "安全说明：接口使用普通 HTTP，访问时必须携带令牌。"
         if [ "${TRAFFIC_API_HOST}" = "0.0.0.0" ]; then
           echo "当前已允许 IP 访问，请确认防火墙仅放行可信来源；生产环境建议使用 HTTPS 反向代理。"
@@ -2313,6 +2559,8 @@ write_config() {
       ipv6) route_tag="direct-ipv6" ;;
       ipv4v6) route_tag="direct-ipv4v6" ;;
       ipv6v4) route_tag="direct-ipv6v4" ;;
+      happy4v6) route_tag="direct-happy-ipv4v6" ;;
+      happy6v4) route_tag="direct-happy-ipv6v4" ;;
       *) continue ;;
     esac
     case "${route_type}" in
@@ -2330,7 +2578,15 @@ write_config() {
     ipv6) BASE_OUTBOUND_TAG="direct-ipv6" ;;
     ipv4v6) BASE_OUTBOUND_TAG="direct-ipv4v6" ;;
     ipv6v4) BASE_OUTBOUND_TAG="direct-ipv6v4" ;;
+    happy4v6) BASE_OUTBOUND_TAG="direct-happy-ipv4v6" ;;
+    happy6v4) BASE_OUTBOUND_TAG="direct-happy-ipv6v4" ;;
     *) fail "基础出站模式无效。" ;;
+  esac
+
+  case "${INBOUND_MODE}" in
+    ipv4) INBOUND_LISTEN="0.0.0.0" ;;
+    ipv6) INBOUND_LISTEN="::" ;;
+    *) fail "节点入口模式无效。" ;;
   esac
 
   if [ "${FALLBACK_MODE}" = "protected" ]; then
@@ -2399,7 +2655,7 @@ write_config() {
   },
   "inbounds": [
     {
-      "listen": "0.0.0.0",
+      "listen": "${INBOUND_LISTEN}",
       "port": ${PORT},
       "protocol": "vless",
       "tag": "vless-in",
@@ -2431,6 +2687,8 @@ write_config() {
     {"protocol": "freedom", "tag": "direct-ipv6", "settings": {"domainStrategy": "UseIPv6"}},
     {"protocol": "freedom", "tag": "direct-ipv4v6", "settings": {"domainStrategy": "UseIPv4v6"}},
     {"protocol": "freedom", "tag": "direct-ipv6v4", "settings": {"domainStrategy": "UseIPv6v4"}},
+    {"protocol": "freedom", "tag": "direct-happy-ipv4v6", "settings": {"domainStrategy": "UseIPv4v6"}, "streamSettings": {"sockopt": {"happyEyeballs": {"tryDelayMs": ${HAPPY_EYEBALLS_DELAY_MS}, "prioritizeIPv6": false}}}},
+    {"protocol": "freedom", "tag": "direct-happy-ipv6v4", "settings": {"domainStrategy": "UseIPv6v4"}, "streamSettings": {"sockopt": {"happyEyeballs": {"tryDelayMs": ${HAPPY_EYEBALLS_DELAY_MS}, "prioritizeIPv6": true}}}},
     {"protocol": "blackhole", "tag": "block"},
     {"protocol": "freedom", "tag": "api"}
   ],
@@ -2503,6 +2761,61 @@ modify_port() {
 }
 modify_sni() { load_state; prompt_sni; apply_config; }
 modify_tag() { load_state; prompt_tag; apply_config; }
+modify_inbound_mode() {
+  local input next_mode default_option current_label
+  load_state
+  refresh_network_status
+  case "${INBOUND_MODE}" in
+    ipv6) default_option="2"; current_label="IPv6（::）" ;;
+    *) default_option="1"; current_label="IPv4（0.0.0.0）" ;;
+  esac
+  echo
+  echo "当前节点入口：${current_label}"
+  echo "  1. IPv4（监听 0.0.0.0）"
+  echo "  2. IPv6（监听 ::）"
+  echo "  0. 返回主菜单"
+  printf '选择节点入口 [%s]: ' "${default_option}"
+  read -r input
+  case "${input:-${default_option}}" in
+    1) next_mode="ipv4" ;;
+    2) next_mode="ipv6" ;;
+    0) return ;;
+    *) echo "无效的节点入口选择。"; return ;;
+  esac
+
+  case "${next_mode}" in
+    ipv4)
+      if [ "${IPV4_STATUS}" != "available" ]; then
+        warn "当前检测不到公网 IPv4；切换后新链接可能无法连接。"
+        printf '仍要切换到 IPv4 入口吗？[y/N]: '
+        read -r input
+        case "${input}" in y|Y|yes|YES) ;; *) echo "已取消切换。"; return ;; esac
+      fi
+      [ -n "${IPV4_ADDRESS}" ] && SERVER_IPV4="${IPV4_ADDRESS}"
+      ;;
+    ipv6)
+      if [ "${IPV6_STATUS}" != "available" ]; then
+        warn "当前检测不到公网 IPv6；切换后新链接可能无法连接。"
+        printf '仍要切换到 IPv6 入口吗？[y/N]: '
+        read -r input
+        case "${input}" in y|Y|yes|YES) ;; *) echo "已取消切换。"; return ;; esac
+      fi
+      [ -n "${IPV6_ADDRESS}" ] && SERVER_IPV6="${IPV6_ADDRESS}"
+      ;;
+  esac
+
+  if [ "${next_mode}" = "${INBOUND_MODE}" ]; then
+    echo "节点入口未改变。"
+    show_node
+    return
+  fi
+
+  warn "切换入口会短暂重启 Xray；旧入口地址将不再可用。"
+  INBOUND_MODE="${next_mode}"
+  apply_config
+  show_node
+}
+
 modify_fallback() {
   load_state
   old_fallback_mode="${FALLBACK_MODE}"
@@ -2565,14 +2878,15 @@ show_menu() {
   echo " 2. 修改监听端口"
   echo " 3. 修改 Reality SNI"
   echo " 4. 修改节点名称"
-  echo " 5. 配置 Reality 回落与限速"
-  echo " 6. 管理出站策略（基础：$(outbound_mode_label "${BASE_OUTBOUND_MODE}")）"
-  echo " 7. 流量统计与 MiSub API"
-  echo " 8. 重启 Xray"
-  echo " 9. 查看服务状态"
-  echo "10. 查看日志"
-  echo "11. 重置当前节点"
-  echo "12. 卸载并清理环境"
+  echo " 5. 切换节点入口 IPv4/IPv6"
+  echo " 6. 配置 Reality 回落与限速"
+  echo " 7. 管理出站策略（基础：$(outbound_mode_label "${BASE_OUTBOUND_MODE}")）"
+  echo " 8. 流量统计与 MiSub API"
+  echo " 9. 重启 Xray"
+  echo "10. 查看服务状态"
+  echo "11. 查看日志"
+  echo "12. 重置当前节点"
+  echo "13. 卸载并清理环境"
   echo " 0. 退出"
   echo
   printf '请选择操作: '
@@ -2588,19 +2902,20 @@ main() {
       2) modify_port ;;
       3) modify_sni ;;
       4) modify_tag ;;
-      5) modify_fallback ;;
-      6) manage_outbound_strategy ;;
-      7) manage_traffic ;;
-      8) restart_xray ;;
-      9) systemctl status xray --no-pager || true ;;
-      10) journalctl -u xray -n 80 --no-pager || true ;;
-      11) reset_node ;;
-      12) uninstall_xray ;;
+      5) modify_inbound_mode ;;
+      6) modify_fallback ;;
+      7) manage_outbound_strategy ;;
+      8) manage_traffic ;;
+      9) restart_xray ;;
+      10) systemctl status xray --no-pager || true ;;
+      11) journalctl -u xray -n 80 --no-pager || true ;;
+      12) reset_node ;;
+      13) uninstall_xray ;;
       0) exit 0 ;;
       *) echo "无效选择，请重新输入。" ;;
     esac
     case "${choice}" in
-      6|7) ;;
+      7|8) ;;
       *)
         echo
         printf '按回车返回菜单...'
@@ -2616,25 +2931,29 @@ EOF
 }
 
 print_result() {
-  local host uri api_host
+  local host uri api_host inbound_label
   api_host="127.0.0.1"
   if [ -f "${TRAFFIC_API_SETTINGS_FILE}" ]; then
     # shellcheck disable=SC1090
     . "${TRAFFIC_API_SETTINGS_FILE}"
     api_host="${VVR_TRAFFIC_API_HOST:-127.0.0.1}"
   fi
-  if [ -n "${SERVER_IPV4}" ]; then
-    host="${SERVER_IPV4}"
-  elif [ -n "${SERVER_IPV6}" ]; then
-    host="[${SERVER_IPV6}]"
-  else
-    host="你的服务器地址"
-  fi
+  case "${INBOUND_MODE}" in
+    ipv6)
+      inbound_label="IPv6（::）"
+      if [ -n "${SERVER_IPV6}" ]; then host="[${SERVER_IPV6}]"; else host="[你的服务器IPv6地址]"; fi
+      ;;
+    *)
+      inbound_label="IPv4（0.0.0.0）"
+      if [ -n "${SERVER_IPV4}" ]; then host="${SERVER_IPV4}"; else host="你的服务器IPv4地址"; fi
+      ;;
+  esac
   uri="vless://${UUID}@${host}:${PORT}?type=tcp&encryption=none&security=reality&pbk=${PUBLIC_KEY}&fp=${FINGERPRINT}&sni=${SNI}&sid=${SHORT_ID}&spx=%2F&flow=xtls-rprx-vision#${TAG}"
   echo
   ok "Xray VLESS Reality 节点安装完成。"
   echo "配置文件：${CONFIG_FILE}"
   echo "管理菜单：vvr"
+  echo "节点入口：${inbound_label}"
   if [ "${api_host}" = "0.0.0.0" ]; then
     if [ -n "${SERVER_IPV4}" ]; then
       echo "流量 API：http://${SERVER_IPV4}:18080/api/traffic（令牌见 /etc/xray/vvr-traffic.token）"
@@ -2645,6 +2964,8 @@ print_result() {
   else
     echo "流量 API：http://127.0.0.1:18080/api/traffic（令牌见 /etc/xray/vvr-traffic.token）"
   fi
+  echo "MiSub 兼容接口：请将面板地址配置为上述主机的 http(s)://主机:18080，入站 ID 可留空或填写 1。"
+  echo "MiSub 请求认证：Authorization: Bearer <令牌>。"
   echo "服务状态：systemctl status xray --no-pager"
   echo "日志查看：journalctl -u xray -f"
   echo
@@ -2654,6 +2975,8 @@ print_result() {
     ipv6) echo "  基础出站：仅 IPv6" ;;
     ipv4v6) echo "  基础出站：IPv4 优先，IPv6 兜底" ;;
     ipv6v4) echo "  基础出站：IPv6 优先，IPv4 兜底" ;;
+    happy4v6) echo "  基础出站：IPv4 优先连接竞速（${HAPPY_EYEBALLS_DELAY_MS}ms 后 IPv6 参与竞争）" ;;
+    happy6v4) echo "  基础出站：IPv6 优先连接竞速（${HAPPY_EYEBALLS_DELAY_MS}ms 后 IPv4 参与竞争）" ;;
   esac
   echo "  自定义规则文件：${ROUTES_FILE}"
   echo
