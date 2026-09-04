@@ -630,7 +630,7 @@ TOKEN_FILE = os.environ.get("VVR_TRAFFIC_TOKEN_FILE", "/etc/xray/vvr-traffic.tok
 SETTINGS_FILE = os.environ.get("VVR_TRAFFIC_SETTINGS_FILE", "/etc/xray/vvr-traffic-settings.env")
 
 def reset_settings():
-    settings = {"day": 1, "hour": 0, "minute": 0}
+    settings = {"day": 1, "hour": 0, "minute": 0, "collection_enabled": True}
     try:
         with open(SETTINGS_FILE, encoding="utf-8") as handle:
             for line in handle:
@@ -643,6 +643,8 @@ def reset_settings():
                         settings["hour"] = int(value)
                     elif key == "RESET_MINUTE":
                         settings["minute"] = int(value)
+                    elif key == "COLLECTION_ENABLED":
+                        settings["collection_enabled"] = value.lower() not in ("0", "false", "no", "off")
     except (OSError, ValueError):
         pass
     settings["day"] = min(max(settings["day"], 1), 28)
@@ -674,17 +676,25 @@ def xray_stats():
     values = {item.get("name"): int(item.get("value", 0)) for item in payload.get("stat", [])}
     return values.get("inbound>>>vless-in>>>traffic>>>uplink", 0), values.get("inbound>>>vless-in>>>traffic>>>downlink", 0)
 
-def collect():
-    up, down = xray_stats()
+def collect(force=False):
     now = datetime.now().isoformat(timespec="seconds")
     period = period_key()
+    settings = reset_settings()
     db = db_connect()
     row = db.execute("SELECT month,total_up,total_down,last_up,last_down FROM traffic WHERE id=1").fetchone()
+    if not settings["collection_enabled"] and not force:
+        if row is None or row[0] != period:
+            result = {"month": period[:7], "period_start": period, "up": 0, "down": 0, "total": 0, "updated_at": now, "collection_enabled": False}
+        else:
+            result = {"month": period[:7], "period_start": period, "up": row[1], "down": row[2], "total": row[1] + row[2], "updated_at": now, "collection_enabled": False}
+        db.close()
+        return result
+    up, down = xray_stats()
     if up is None or down is None:
         if row is None or row[0] != period:
-            result = {"month": period[:7], "period_start": period, "up": 0, "down": 0, "total": 0, "updated_at": now}
+            result = {"month": period[:7], "period_start": period, "up": 0, "down": 0, "total": 0, "updated_at": now, "collection_enabled": settings["collection_enabled"]}
         else:
-            result = {"month": period[:7], "period_start": period, "up": row[1], "down": row[2], "total": row[1] + row[2], "updated_at": now}
+            result = {"month": period[:7], "period_start": period, "up": row[1], "down": row[2], "total": row[1] + row[2], "updated_at": now, "collection_enabled": settings["collection_enabled"]}
         db.close()
         return result
     if row is None or row[0] != period:
@@ -699,7 +709,7 @@ def collect():
     db.execute("INSERT INTO traffic(id,month,total_up,total_down,last_up,last_down,updated_at) VALUES(1,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET month=excluded.month,total_up=excluded.total_up,total_down=excluded.total_down,last_up=excluded.last_up,last_down=excluded.last_down,updated_at=excluded.updated_at", (period,total_up,total_down,up,down,now))
     db.commit()
     db.close()
-    return {"month": period[:7], "period_start": period, "up": total_up, "down": total_down, "total": total_up + total_down, "updated_at": now}
+    return {"month": period[:7], "period_start": period, "up": total_up, "down": total_down, "total": total_up + total_down, "updated_at": now, "collection_enabled": settings["collection_enabled"]}
 
 def reset():
     up, down = xray_stats()
@@ -711,7 +721,7 @@ def reset():
     db.execute("INSERT INTO traffic(id,month,total_up,total_down,last_up,last_down,updated_at) VALUES(1,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET month=excluded.month,total_up=0,total_down=0,last_up=excluded.last_up,last_down=excluded.last_down,updated_at=excluded.updated_at", (period,0,0,up,down,now))
     db.commit()
     db.close()
-    return {"month": period[:7], "period_start": period, "up": 0, "down": 0, "total": 0, "updated_at": now}
+    return {"month": period[:7], "period_start": period, "up": 0, "down": 0, "total": 0, "updated_at": now, "collection_enabled": reset_settings()["collection_enabled"]}
 
 def read_token():
     try:
@@ -744,13 +754,14 @@ def main():
     parser.add_argument("--collect", action="store_true")
     parser.add_argument("--reset", action="store_true")
     parser.add_argument("--serve", action="store_true")
+    parser.add_argument("--force", action="store_true")
     parser.add_argument("--host", default=os.environ.get("VVR_TRAFFIC_API_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=18080)
     args = parser.parse_args()
     if args.reset:
         print(json.dumps(reset(), ensure_ascii=False))
     elif args.collect:
-        print(json.dumps(collect(), ensure_ascii=False))
+        print(json.dumps(collect(force=args.force), ensure_ascii=False))
     elif args.serve:
         HTTPServer((args.host, args.port), Handler).serve_forever()
     else:
@@ -769,6 +780,7 @@ PY
 RESET_DAY='1'
 RESET_HOUR='0'
 RESET_MINUTE='0'
+COLLECTION_ENABLED='1'
 SETTINGS
   fi
   chmod 0600 "${TRAFFIC_SETTINGS_FILE}"
@@ -824,7 +836,11 @@ WantedBy=multi-user.target
 EOF
   chmod 0644 "${TRAFFIC_COLLECTOR_SERVICE_FILE}" "${TRAFFIC_TIMER_FILE}" "${TRAFFIC_SERVICE_FILE}"
   systemctl daemon-reload
-  systemctl enable --now vvr-traffic-api.service vvr-traffic-collector.timer
+  systemctl enable --now vvr-traffic-api.service
+  case "$(sed -n "s/^COLLECTION_ENABLED='\([^']*\)'.*/\1/p" "${TRAFFIC_SETTINGS_FILE}" 2>/dev/null || true)" in
+    0|false|no|off) systemctl disable --now vvr-traffic-collector.timer ;;
+    *) systemctl enable --now vvr-traffic-collector.timer ;;
+  esac
   # 重新安装或升级时，确保已运行的 API 进程读取最新监听配置。
   systemctl restart vvr-traffic-api.service
 }
@@ -1825,6 +1841,7 @@ load_traffic_settings() {
   RESET_DAY="1"
   RESET_HOUR="0"
   RESET_MINUTE="0"
+  COLLECTION_ENABLED="1"
   if [ -f "${TRAFFIC_SETTINGS_FILE}" ]; then
     # shellcheck disable=SC1090
     . "${TRAFFIC_SETTINGS_FILE}"
@@ -1834,6 +1851,64 @@ load_traffic_settings() {
 traffic_schedule_label() {
   load_traffic_settings
   printf '每月 %s 日 %02d:%02d' "${RESET_DAY}" "${RESET_HOUR}" "${RESET_MINUTE}"
+}
+
+traffic_auto_collection_label() {
+  load_traffic_settings
+  case "${COLLECTION_ENABLED}" in
+    0|false|no|off) printf '已关闭' ;;
+    *) printf '每分钟一次' ;;
+  esac
+}
+
+traffic_collector_state() {
+  local active enabled
+  load_traffic_settings
+  case "${COLLECTION_ENABLED}" in
+    0|false|no|off) printf '已关闭（不会自动采集）'; return ;;
+  esac
+  active=0
+  enabled=0
+  systemctl is-active --quiet vvr-traffic-collector.timer && active=1
+  systemctl is-enabled --quiet vvr-traffic-collector.timer && enabled=1
+  case "${active}:${enabled}" in
+    1:1) printf '已开启（定时器运行中）' ;;
+    1:0) printf '运行中但未设置开机启动' ;;
+    0:1) printf '已设置开机启动但当前未运行' ;;
+    *) printf '未开启' ;;
+  esac
+}
+
+traffic_last_collection() {
+  if [ -f "${TRAFFIC_DB}" ]; then
+    if command -v stat >/dev/null 2>&1; then
+      stat -c '%y' "${TRAFFIC_DB}" 2>/dev/null | cut -d. -f1
+      return
+    fi
+  fi
+  printf '暂无采集记录'
+}
+
+traffic_collection_status() {
+  local api_state
+  if systemctl is-active --quiet vvr-traffic-api.service; then
+    api_state='运行中'
+  else
+    api_state='未运行'
+  fi
+  echo "  采集状态：$(traffic_collector_state)"
+  echo "  API 状态：${api_state}"
+  echo "  最近采集：$(traffic_last_collection)"
+  load_traffic_settings
+  case "${COLLECTION_ENABLED}" in
+    0|false|no|off)
+      echo "  关闭说明：API 仅返回已保存数据，立即采集仍可手动执行。"
+      return
+      ;;
+  esac
+  if ! systemctl is-active --quiet vvr-traffic-collector.timer; then
+    echo "  恢复命令：systemctl enable --now vvr-traffic-collector.timer"
+  fi
 }
 
 configure_traffic_schedule() {
@@ -1859,10 +1934,70 @@ configure_traffic_schedule() {
 RESET_DAY='${day}'
 RESET_HOUR='${hour#0}'
 RESET_MINUTE='${minute#0}'
+COLLECTION_ENABLED='${COLLECTION_ENABLED}'
 SETTINGS
   chmod 0600 "${TRAFFIC_SETTINGS_FILE}"
   ok "流量重置时间已设置为每月 ${day} 日 ${hour}:${minute}。"
   echo "下一次采集或 API 请求时按新周期计算，无需重启 Xray。"
+}
+
+configure_traffic_collection() {
+  local input answer enabled default
+  MENU_RETURNED=0
+  load_traffic_settings
+  case "${COLLECTION_ENABLED}" in
+    0|false|no|off) echo "当前状态：已关闭"; default=2 ;;
+    *) echo "当前状态：已开启"; default=1 ;;
+  esac
+  while :; do
+    echo "  1. 开启流量采集"
+    echo "  2. 关闭流量采集"
+    echo "  3. 立即采集一次（手动）"
+    echo "  0. 返回上一级"
+    printf '请选择操作 [%s]: ' "${default}"
+    read -r input
+    input="${input:-${default}}"
+    case "${input}" in
+      1) enabled=1; break ;;
+      2) enabled=0; break ;;
+      3) traffic_collect_now; return ;;
+      0) MENU_RETURNED=1; return ;;
+      *) echo "无效选择，请输入 0-3。" ;;
+    esac
+  done
+  if [ "${enabled}" -eq 0 ]; then
+    echo "关闭后将停止定时采集，API 只返回已保存数据。"
+  else
+    echo "开启后将恢复每分钟自动采集。"
+  fi
+  printf '确认修改流量采集状态？[Y/n]: '
+  read -r answer
+  case "${answer}" in
+    ''|y|Y|yes|YES) ;;
+    n|N|no|NO) echo "已取消修改。"; return ;;
+    *) echo "输入无效，已取消修改。"; return ;;
+  esac
+  cat > "${TRAFFIC_SETTINGS_FILE}" <<SETTINGS
+RESET_DAY='${RESET_DAY}'
+RESET_HOUR='${RESET_HOUR}'
+RESET_MINUTE='${RESET_MINUTE}'
+COLLECTION_ENABLED='${enabled}'
+SETTINGS
+  chmod 0600 "${TRAFFIC_SETTINGS_FILE}"
+  if [ "${enabled}" -eq 1 ]; then
+    if ! systemctl enable --now vvr-traffic-collector.timer; then
+      warn "流量采集定时器启动失败，请检查：systemctl status vvr-traffic-collector.timer --no-pager"
+      return
+    fi
+    ok "流量采集已开启。"
+  else
+    if ! systemctl disable --now vvr-traffic-collector.timer; then
+      warn "流量采集定时器停止失败，请检查：systemctl status vvr-traffic-collector.timer --no-pager"
+      return
+    fi
+    ok "流量采集已关闭；API 服务仍可读取已保存数据。"
+  fi
+  echo "无需重启 Xray。"
 }
 
 load_traffic_api_settings() {
@@ -1955,6 +2090,7 @@ traffic_status() {
   if ! systemctl is-active --quiet vvr-traffic-api.service; then
     warn "流量 API 服务未运行。"
   fi
+  traffic_collection_status
   curl -fsS --max-time 5 "http://127.0.0.1:18080/api/traffic?token=$(cat "${CONFIG_DIR}/vvr-traffic.token" 2>/dev/null || true)" || warn "暂时无法读取流量统计。"
   echo
 }
@@ -1962,7 +2098,7 @@ traffic_status() {
 traffic_collect_now() {
   [ -x "${TRAFFIC_SCRIPT}" ] || { echo "流量统计组件未安装。"; return; }
   info "正在立即采集流量..."
-  if ! /usr/bin/python3 "${TRAFFIC_SCRIPT}" --collect; then
+  if ! /usr/bin/python3 "${TRAFFIC_SCRIPT}" --collect --force; then
     warn "流量采集失败，请确认 Xray 正常运行。"
   fi
 }
@@ -2042,14 +2178,16 @@ manage_traffic() {
     echo "=============================="
     echo " API 监听：$(traffic_api_binding_label)"
     echo " API 地址：$(traffic_api_endpoint)"
-    echo " 自动采集：每分钟一次；$(traffic_schedule_label)自动开始新周期"
+    echo " 自动采集：$(traffic_auto_collection_label)；$(traffic_schedule_label)自动开始新周期"
+    traffic_collection_status
     echo " 1. 查看当前流量"
     echo " 2. 立即采集一次"
     echo " 3. 重置当前周期流量"
     echo " 4. 查看 MiSub API 信息"
     echo " 5. 设置每月重置时间"
     echo " 6. 修改服务器时区（当前：$(server_timezone)）"
-    echo " 7. 设置 API 访问方式"
+    echo " 7. 开启/关闭流量采集"
+    echo " 8. 设置 API 访问方式"
     echo " 0. 返回主菜单"
     echo
     printf '请选择操作: '
@@ -2085,6 +2223,13 @@ manage_traffic() {
         fi
         ;;
       7)
+        configure_traffic_collection
+        if [ "${MENU_RETURNED:-0}" -eq 1 ]; then
+          MENU_RETURNED=0
+          continue
+        fi
+        ;;
+      8)
         configure_traffic_api
         if [ "${MENU_RETURNED:-0}" -eq 1 ]; then
           MENU_RETURNED=0
