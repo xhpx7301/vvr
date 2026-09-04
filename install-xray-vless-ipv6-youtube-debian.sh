@@ -903,9 +903,17 @@ class Handler(BaseHTTPRequestHandler):
         authorization = self.headers.get("Authorization", "")
         bearer = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
         api_key = self.headers.get("X-API-Key", "").strip()
-        supplied = bearer or api_key or query.get("token", [""])[0]
+        query_token = query.get("token", [""])[0].strip()
+        supplied = bearer or api_key or query_token
         if supplied != token:
-            self.send_error(403, "invalid token")
+            source = "bearer" if bearer else "x-api-key" if api_key else "query" if query_token else "missing"
+            body = b"invalid token"
+            self.send_response(403)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("X-VVR-Auth-Reason", source)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return False
         return True
 
