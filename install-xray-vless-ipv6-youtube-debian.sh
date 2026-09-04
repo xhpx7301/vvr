@@ -14,6 +14,7 @@ NETWORK_STATUS_FILE="${CONFIG_DIR}/vvr-network-status.env"
 TRAFFIC_DIR="/var/lib/vvr"
 TRAFFIC_DB="${TRAFFIC_DIR}/traffic.db"
 TRAFFIC_SETTINGS_FILE="${CONFIG_DIR}/vvr-traffic-settings.env"
+TRAFFIC_API_SETTINGS_FILE="${CONFIG_DIR}/vvr-traffic-api.env"
 TRAFFIC_SCRIPT="/usr/local/libexec/vvr-traffic.py"
 TRAFFIC_SERVICE_FILE="/etc/systemd/system/vvr-traffic-api.service"
 TRAFFIC_TIMER_FILE="/etc/systemd/system/vvr-traffic-collector.timer"
@@ -609,7 +610,7 @@ EOF
 }
 
 write_traffic_components() {
-  mkdir -p "${TRAFFIC_DIR}" "$(dirname "${TRAFFIC_SCRIPT}")"
+  mkdir -p "${TRAFFIC_DIR}" "$(dirname "${TRAFFIC_SCRIPT}")" "${CONFIG_DIR}"
   chmod 0755 "${TRAFFIC_DIR}"
   cat > "${TRAFFIC_SCRIPT}" <<'PY'
 #!/usr/bin/env python3
@@ -743,7 +744,7 @@ def main():
     parser.add_argument("--collect", action="store_true")
     parser.add_argument("--reset", action="store_true")
     parser.add_argument("--serve", action="store_true")
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--host", default=os.environ.get("VVR_TRAFFIC_API_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=18080)
     args = parser.parse_args()
     if args.reset:
@@ -771,6 +772,12 @@ RESET_MINUTE='0'
 SETTINGS
   fi
   chmod 0600 "${TRAFFIC_SETTINGS_FILE}"
+  if [ ! -s "${TRAFFIC_API_SETTINGS_FILE}" ]; then
+    cat > "${TRAFFIC_API_SETTINGS_FILE}" <<SETTINGS
+VVR_TRAFFIC_API_HOST='127.0.0.1'
+SETTINGS
+  fi
+  chmod 0600 "${TRAFFIC_API_SETTINGS_FILE}"
   cat > "${TRAFFIC_COLLECTOR_SERVICE_FILE}" <<EOF
 [Unit]
 Description=VVR Xray traffic collector
@@ -805,7 +812,8 @@ Environment=VVR_XRAY_BIN=${XRAY_BIN}
 Environment=VVR_XRAY_API=127.0.0.1:10085
 Environment=VVR_TRAFFIC_TOKEN_FILE=${CONFIG_DIR}/vvr-traffic.token
 Environment=VVR_TRAFFIC_SETTINGS_FILE=${TRAFFIC_SETTINGS_FILE}
-ExecStart=/usr/bin/python3 ${TRAFFIC_SCRIPT} --serve --host 127.0.0.1 --port 18080
+EnvironmentFile=-${TRAFFIC_API_SETTINGS_FILE}
+ExecStart=/usr/bin/python3 ${TRAFFIC_SCRIPT} --serve --port 18080
 Restart=on-failure
 RestartSec=5s
 NoNewPrivileges=true
@@ -817,6 +825,8 @@ EOF
   chmod 0644 "${TRAFFIC_COLLECTOR_SERVICE_FILE}" "${TRAFFIC_TIMER_FILE}" "${TRAFFIC_SERVICE_FILE}"
   systemctl daemon-reload
   systemctl enable --now vvr-traffic-api.service vvr-traffic-collector.timer
+  # 重新安装或升级时，确保已运行的 API 进程读取最新监听配置。
+  systemctl restart vvr-traffic-api.service
 }
 
 validate_and_start() {
@@ -856,6 +866,7 @@ NETWORK_STATUS_FILE="${CONFIG_DIR}/vvr-network-status.env"
 TRAFFIC_DIR="/var/lib/vvr"
 TRAFFIC_DB="${TRAFFIC_DIR}/traffic.db"
 TRAFFIC_SETTINGS_FILE="${CONFIG_DIR}/vvr-traffic-settings.env"
+TRAFFIC_API_SETTINGS_FILE="${CONFIG_DIR}/vvr-traffic-api.env"
 TRAFFIC_SCRIPT="/usr/local/libexec/vvr-traffic.py"
 TRAFFIC_SERVICE_FILE="/etc/systemd/system/vvr-traffic-api.service"
 TRAFFIC_TIMER_FILE="/etc/systemd/system/vvr-traffic-collector.timer"
@@ -1403,6 +1414,7 @@ delete_outbound_rule() {
 
 manage_outbound_strategy() {
   local input
+  MENU_RETURNED=0
   load_state
   ensure_routes_file
   refresh_network_status
@@ -1435,7 +1447,13 @@ manage_outbound_strategy() {
       3) add_domain_rule; [ "${MENU_CHANGED}" -eq 1 ] || continue; apply_config ;;
       4) add_geosite_rule; [ "${MENU_CHANGED}" -eq 1 ] || continue; apply_config ;;
       5) delete_outbound_rule; [ "${MENU_CHANGED}" -eq 1 ] || continue; apply_config ;;
-      6) test_network_and_rules ;;
+      6)
+        test_network_and_rules
+        if [ "${MENU_RETURNED:-0}" -eq 1 ]; then
+          MENU_RETURNED=0
+          continue
+        fi
+        ;;
       0) return ;;
       *) echo "无效选择，请重新输入。" ;;
     esac
@@ -1447,17 +1465,32 @@ manage_outbound_strategy() {
 
 build_test_routing_rules() {
   TEST_ROUTING_RULES=""
+  TEST_RULE_OUTBOUNDS=""
+  TEST_RULE_DESCRIPTIONS=""
+  TEST_ROUTE_NUMBER=0
   ensure_routes_file
   while IFS='|' read -r route_mode route_type route_value; do
     [ -n "${route_mode}" ] || continue
-    route_tag="$(outbound_tag_for_mode "${route_mode}" 2>/dev/null || true)"
-    [ -n "${route_tag}" ] || continue
+    TEST_ROUTE_NUMBER=$((TEST_ROUTE_NUMBER + 1))
+    route_strategy=""
+    case "${route_mode}" in
+      ipv4) route_strategy="UseIPv4" ;;
+      ipv6) route_strategy="UseIPv6" ;;
+      ipv4v6) route_strategy="UseIPv4v6" ;;
+      ipv6v4) route_strategy="UseIPv6v4" ;;
+      *) continue ;;
+    esac
     case "${route_type}" in
       domain) route_domain="${route_value}" ;;
       geosite) route_domain="geosite:${route_value}" ;;
       *) continue ;;
     esac
     [ -n "${route_domain}" ] || continue
+    route_tag="test-rule-${TEST_ROUTE_NUMBER}"
+    TEST_RULE_OUTBOUNDS="${TEST_RULE_OUTBOUNDS}    {\"protocol\": \"freedom\", \"tag\": \"${route_tag}\", \"settings\": {\"domainStrategy\": \"${route_strategy}\"}},
+"
+    TEST_RULE_DESCRIPTIONS="${TEST_RULE_DESCRIPTIONS}${route_tag}|${route_mode}|${route_type}|${route_value}
+"
     TEST_ROUTING_RULES="${TEST_ROUTING_RULES}      {\"type\": \"field\", \"domain\": [\"${route_domain}\"], \"outboundTag\": \"${route_tag}\"},
 "
   done < "${ROUTES_FILE}"
@@ -1520,6 +1553,7 @@ ensure_tcpdump() {
 
 capture_outbound_connections() {
   local input filter label
+  MENU_RETURNED=0
   ensure_tcpdump || return
   while :; do
     echo
@@ -1534,7 +1568,7 @@ capture_outbound_connections() {
       1) filter='ip and tcp port 443'; label='IPv4' ;;
       2) filter='ip6 and tcp port 443'; label='IPv6' ;;
       3) filter='(ip or ip6) and tcp port 443'; label='IPv4 / IPv6' ;;
-      0) return ;;
+      0) MENU_RETURNED=1; return ;;
       *) echo "无效选择，请重新输入。"; continue ;;
     esac
     echo
@@ -1552,16 +1586,22 @@ capture_outbound_connections() {
     wait "${CAPTURE_PID}" >/dev/null 2>&1 || true
     CAPTURE_PID=""
     trap - INT TERM HUP
+    MENU_RETURNED=1
     return
   done
 }
 
 cleanup_rule_test() {
+  if [ -n "${TEST_CAPTURE_PID:-}" ] && kill -0 "${TEST_CAPTURE_PID}" >/dev/null 2>&1; then
+    kill "${TEST_CAPTURE_PID}" >/dev/null 2>&1 || true
+    wait "${TEST_CAPTURE_PID}" 2>/dev/null || true
+  fi
   if [ -n "${TEST_PID:-}" ] && kill -0 "${TEST_PID}" >/dev/null 2>&1; then
     kill "${TEST_PID}" >/dev/null 2>&1 || true
     wait "${TEST_PID}" 2>/dev/null || true
   fi
-  rm -f "${TEST_CONFIG:-}" "${TEST_ACCESS_LOG:-}" "${TEST_ERROR_LOG:-}" "${TEST_RUNTIME_LOG:-}" "${TEST_CHECK_LOG:-}"
+  rm -f "${TEST_CONFIG:-}" "${TEST_ACCESS_LOG:-}" "${TEST_ERROR_LOG:-}" "${TEST_RUNTIME_LOG:-}" "${TEST_CHECK_LOG:-}" "${TEST_PACKET_LOG:-}"
+  TEST_CAPTURE_PID=""
   TEST_PID=""
 }
 
@@ -1574,7 +1614,7 @@ write_rule_test_config() {
   cat > "${TEST_CONFIG}" <<CONFIG
 {
   "log": {
-    "loglevel": "warning",
+    "loglevel": "info",
     "access": "${TEST_ACCESS_LOG}",
     "error": "${TEST_ERROR_LOG}"
   },
@@ -1592,6 +1632,7 @@ write_rule_test_config() {
     {"protocol": "freedom", "tag": "direct-ipv6", "settings": {"domainStrategy": "UseIPv6"}},
     {"protocol": "freedom", "tag": "direct-ipv4v6", "settings": {"domainStrategy": "UseIPv4v6"}},
     {"protocol": "freedom", "tag": "direct-ipv6v4", "settings": {"domainStrategy": "UseIPv6v4"}},
+${TEST_RULE_OUTBOUNDS}
     {"protocol": "blackhole", "tag": "block"}
   ],
   "routing": {
@@ -1606,57 +1647,35 @@ CONFIG
 }
 
 test_selected_outbound_rule() {
-  local input count selected_rule route_mode route_type route_value default_url test_url expected_tag http_code actual_tag
+  local test_url http_code actual_tag request_ok matched_rule matched_mode matched_type matched_value actual_ip_family target_port
   MENU_CHANGED=0
+  MENU_RETURNED=0
   ensure_routes_file
-  count="$(awk 'NF { number++ } END { print number + 0 }' "${ROUTES_FILE}")"
-  [ "${count}" -gt 0 ] || { echo "暂无可测试的规则。"; return; }
-  list_outbound_rules
+  echo "请输入要测试的 URL，脚本会按当前规则顺序检查实际命中项。"
   while :; do
-    printf '输入要测试的规则编号（0 返回）: '
-    read -r input
-    case "${input}" in
-      0) return ;;
-      ''|*[!0-9]*) echo "请输入有效编号。" ;;
-      *)
-        [ "${input}" -ge 1 ] && [ "${input}" -le "${count}" ] || { echo "编号超出范围。"; continue; }
-        selected_rule="$(awk -F'|' -v target="${input}" 'NF { number++ } number == target { print; exit }' "${ROUTES_FILE}")"
-        break
-        ;;
-    esac
-  done
-  IFS='|' read -r route_mode route_type route_value <<RULE
-${selected_rule}
-RULE
-  expected_tag="$(outbound_tag_for_mode "${route_mode}")"
-  if [ "${route_type}" = "domain" ]; then
-    default_url="https://${route_value#*:}/"
-  else
-    default_url=""
-  fi
-  while :; do
-    if [ -n "${default_url}" ]; then
-      printf '测试 URL [%s]（输入 0 返回）: ' "${default_url}"
-    else
-      printf '测试 URL（必须命中该 geosite 规则；输入 0 返回）: '
-    fi
+    printf '测试 URL（例如 https://www.youtube.com/；输入 0 返回）: '
     read -r test_url
-    test_url="${test_url:-${default_url}}"
     case "${test_url}" in
-      0) return ;;
+      0) MENU_RETURNED=1; return ;;
       http://*|https://*)
         case "${test_url}" in *[[:space:]]*) echo "URL 不能包含空格。" ;; *) break ;; esac
         ;;
       *) echo "请输入以 http:// 或 https:// 开头的 URL。" ;;
     esac
   done
+  if ! command -v tcpdump >/dev/null 2>&1; then
+    warn "确认最终使用 IPv4 或 IPv6 需要 tcpdump。"
+    ensure_tcpdump || true
+  fi
 
   TEST_CONFIG="$(mktemp /tmp/vvr-route-test.XXXXXX.json)"
   TEST_ACCESS_LOG="${TEST_CONFIG}.access"
   TEST_ERROR_LOG="${TEST_CONFIG}.error"
   TEST_RUNTIME_LOG="${TEST_CONFIG}.runtime"
   TEST_CHECK_LOG="${TEST_CONFIG}.check"
+  TEST_PACKET_LOG="${TEST_CONFIG}.packets"
   TEST_PID=""
+  TEST_CAPTURE_PID=""
   trap 'cleanup_rule_test' INT TERM HUP
   find_test_port
   write_rule_test_config
@@ -1680,25 +1699,80 @@ RULE
     trap - INT TERM HUP
     return
   fi
-  if http_code="$(curl -sS --proxy "socks5h://127.0.0.1:${TEST_PORT}" --connect-timeout 8 --max-time 20 -o /dev/null -w '%{http_code}' "${test_url}" 2>&1)"; then
+  actual_ip_family=""
+  if command -v tcpdump >/dev/null 2>&1; then
+    case "${test_url}" in
+      http://*) target_port=80 ;;
+      *) target_port=443 ;;
+    esac
+    tcpdump -ni any -nn -l "tcp and port ${target_port} and (tcp[tcpflags] & tcp-syn != 0)" >"${TEST_PACKET_LOG}" 2>&1 &
+    TEST_CAPTURE_PID=$!
     sleep 1
-    actual_tag="$(grep -Eo 'direct-ipv(4v6|6v4|4|6)' "${TEST_ACCESS_LOG}" 2>/dev/null | tail -n 1 || true)"
-    if [ "${actual_tag}" = "${expected_tag}" ]; then
-      ok "规则测试成功：HTTP ${http_code}，实际命中 $(outbound_mode_label "${route_mode}")。"
-    elif [ -n "${actual_tag}" ]; then
-      warn "请求成功（HTTP ${http_code}），但实际命中 $(outbound_mode_label "${actual_tag#direct-}")，不是所选规则的 $(outbound_mode_label "${route_mode}")。请检查前序规则。"
-    else
-      warn "请求成功（HTTP ${http_code}），但未能从临时访问日志确认实际出站标签。"
-    fi
-  else
-    warn "规则测试失败：${http_code}"
   fi
+  request_ok=1
+  if ! http_code="$(curl -sS --proxy "socks5h://127.0.0.1:${TEST_PORT}" --connect-timeout 8 --max-time 20 -o /dev/null -w '%{http_code}' "${test_url}" 2>&1)"; then
+    request_ok=0
+  fi
+  if [ -n "${TEST_CAPTURE_PID}" ]; then
+    sleep 1
+    kill "${TEST_CAPTURE_PID}" >/dev/null 2>&1 || true
+    wait "${TEST_CAPTURE_PID}" >/dev/null 2>&1 || true
+    TEST_CAPTURE_PID=""
+    actual_ip_family="$(awk '/(^| )IP6 / { family="IPv6" } /(^| )IP / { family="IPv4" } END { print family }' "${TEST_PACKET_LOG}" 2>/dev/null || true)"
+  fi
+  sleep 1
+  actual_tag="$({ grep -Eo 'test-rule-[0-9]+|direct-ipv(4v6|6v4|4|6)' "${TEST_ACCESS_LOG}" 2>/dev/null || true; grep -Eo 'test-rule-[0-9]+|direct-ipv(4v6|6v4|4|6)' "${TEST_RUNTIME_LOG}" 2>/dev/null || true; } | tail -n 1)"
+  echo
+  echo "测试 URL：${test_url}"
+  if [ "${request_ok}" -eq 1 ]; then
+    echo "HTTP 结果：${http_code}"
+  else
+    warn "请求失败：${http_code}"
+  fi
+  case "${actual_ip_family}" in
+    IPv4|IPv6) echo "最终使用 IP：${actual_ip_family}（由测试期间 tcpdump 抓包确认）" ;;
+    *)
+      if command -v tcpdump >/dev/null 2>&1; then
+        warn "未能从抓包结果确认最终使用 IPv4 还是 IPv6，请使用实时抓包进一步检查。"
+      else
+        echo "最终使用 IP：未确认（系统未安装 tcpdump；当前仅显示出站策略）"
+      fi
+      ;;
+  esac
+  case "${actual_tag}" in
+    test-rule-*)
+      matched_rule="$(printf '%s' "${TEST_RULE_DESCRIPTIONS}" | awk -F'|' -v tag="${actual_tag}" '$1 == tag { print; exit }')"
+      if [ -n "${matched_rule}" ]; then
+        IFS='|' read -r _ matched_mode matched_type matched_value <<RULE
+${matched_rule}
+RULE
+        case "${matched_type}" in
+          domain) echo "命中规则 #${actual_tag#test-rule-}：域名 ${matched_value}" ;;
+          geosite) echo "命中规则 #${actual_tag#test-rule-}：geosite:${matched_value}" ;;
+        esac
+        echo "规则出站：$(outbound_mode_label "${matched_mode}")"
+        echo "Xray 临时出站标签：${actual_tag}"
+        [ "${request_ok}" -eq 1 ] && ok "URL 测试完成。"
+      else
+        warn "已检测到 ${actual_tag}，但无法读取规则说明。"
+      fi
+      ;;
+    direct-ipv*)
+      echo "命中规则：未命中自定义规则，使用基础出站"
+      echo "基础出站：$(outbound_mode_label "${actual_tag#direct-}")"
+      echo "Xray 临时出站标签：${actual_tag}"
+      ;;
+    *)
+      warn "未能从临时日志读取 Xray 出站标签；HTTP 状态码不能单独证明 IPv4/IPv6 路由结果。"
+      ;;
+  esac
   cleanup_rule_test
   trap - INT TERM HUP
 }
 
 test_network_and_rules() {
   local input
+  MENU_RETURNED=0
   while :; do
     clear 2>/dev/null || true
     echo "=============================="
@@ -1706,7 +1780,7 @@ test_network_and_rules() {
     echo "=============================="
     show_network_status
     echo " 1. 刷新 IPv4 / IPv6 出站状态"
-    echo " 2. 测试指定出站规则"
+    echo " 2. 按 URL 测试出站规则"
     echo " 3. 实时抓取 IPv4 / IPv6 出站连接"
     echo " 0. 返回出站策略管理"
     echo
@@ -1714,9 +1788,21 @@ test_network_and_rules() {
     read -r input
     case "${input}" in
       1) refresh_network_status ;;
-      2) test_selected_outbound_rule ;;
-      3) capture_outbound_connections ;;
-      0) return ;;
+      2)
+        test_selected_outbound_rule
+        if [ "${MENU_RETURNED:-0}" -eq 1 ]; then
+          MENU_RETURNED=0
+          continue
+        fi
+        ;;
+      3)
+        capture_outbound_connections
+        if [ "${MENU_RETURNED:-0}" -eq 1 ]; then
+          MENU_RETURNED=0
+          continue
+        fi
+        ;;
+      0) MENU_RETURNED=1; return ;;
       *) echo "无效选择，请重新输入。" ;;
     esac
     echo
@@ -1742,10 +1828,11 @@ traffic_schedule_label() {
 
 configure_traffic_schedule() {
   local input day hour minute
+  MENU_RETURNED=0
   load_traffic_settings
   printf '每月重置日期（1-28）[%s]（输入 0 返回）: ' "${RESET_DAY}"
   read -r input
-  [ "${input}" = "0" ] && return
+  [ "${input}" = "0" ] && { MENU_RETURNED=1; return; }
   day="${input:-${RESET_DAY}}"
   case "${day}" in ''|*[!0-9]*) echo "日期无效。"; return ;; esac
   [ "${day}" -ge 1 ] && [ "${day}" -le 28 ] || { echo "日期必须为 1 到 28。"; return; }
@@ -1766,6 +1853,88 @@ SETTINGS
   chmod 0600 "${TRAFFIC_SETTINGS_FILE}"
   ok "流量重置时间已设置为每月 ${day} 日 ${hour}:${minute}。"
   echo "下一次采集或 API 请求时按新周期计算，无需重启 Xray。"
+}
+
+load_traffic_api_settings() {
+  TRAFFIC_API_HOST="127.0.0.1"
+  if [ -f "${TRAFFIC_API_SETTINGS_FILE}" ]; then
+    # shellcheck disable=SC1090
+    . "${TRAFFIC_API_SETTINGS_FILE}"
+  fi
+  case "${VVR_TRAFFIC_API_HOST:-${TRAFFIC_API_HOST}}" in
+    0.0.0.0) TRAFFIC_API_HOST="0.0.0.0" ;;
+    *) TRAFFIC_API_HOST="127.0.0.1" ;;
+  esac
+}
+
+traffic_api_binding_label() {
+  load_traffic_api_settings
+  case "${TRAFFIC_API_HOST}" in
+    0.0.0.0) printf '0.0.0.0（允许通过服务器 IPv4 访问）' ;;
+    *) printf '127.0.0.1（仅本机访问）' ;;
+  esac
+}
+
+traffic_api_endpoint() {
+  load_traffic_api_settings
+  if [ "${TRAFFIC_API_HOST}" = "0.0.0.0" ]; then
+    if [ -n "${SERVER_IPV4:-}" ]; then
+      printf 'http://%s:18080/api/traffic' "${SERVER_IPV4}"
+    else
+      printf 'http://服务器IPv4地址:18080/api/traffic'
+    fi
+  else
+    printf 'http://127.0.0.1:18080/api/traffic'
+  fi
+}
+
+configure_traffic_api() {
+  local input answer host
+  MENU_RETURNED=0
+  load_traffic_api_settings
+  echo "当前 API 监听：$(traffic_api_binding_label)"
+  while :; do
+    echo "  1. 仅本机（127.0.0.1）"
+    echo "  2. IP 访问（0.0.0.0）"
+    echo "  0. 返回上一级"
+    printf '请选择 API 访问方式: '
+    read -r input
+    case "${input}" in
+      1) host="127.0.0.1"; break ;;
+      2) host="0.0.0.0"; break ;;
+      0) MENU_RETURNED=1; return ;;
+      *) echo "无效选择，请输入 0-2。" ;;
+    esac
+  done
+  if [ "${host}" = "0.0.0.0" ]; then
+    echo
+    warn "IP 访问会让流量 API 监听所有 IPv4 地址。"
+    echo "请确认服务器防火墙已按需放行 TCP 18080，脚本不会自动修改防火墙。"
+    echo "接口使用普通 HTTP，必须携带令牌；生产环境建议通过反向代理启用 HTTPS。"
+  fi
+  printf '确认切换 API 访问方式？[Y/n]: '
+  read -r answer
+  case "${answer}" in
+    ''|y|Y|yes|YES) ;;
+    n|N|no|NO) echo "已取消修改 API 访问方式。"; return ;;
+    *) echo "输入无效，已取消修改 API 访问方式。"; return ;;
+  esac
+  mkdir -p "${CONFIG_DIR}"
+  cat > "${TRAFFIC_API_SETTINGS_FILE}" <<SETTINGS
+VVR_TRAFFIC_API_HOST='${host}'
+SETTINGS
+  chmod 0600 "${TRAFFIC_API_SETTINGS_FILE}"
+  if ! systemctl restart vvr-traffic-api.service; then
+    warn "API 服务重启失败，请检查：journalctl -u vvr-traffic-api.service -n 50 --no-pager"
+    return
+  fi
+  if systemctl is-active --quiet vvr-traffic-api.service; then
+    ok "API 访问方式已设置为：$(traffic_api_binding_label)"
+    echo "当前接口地址：$(traffic_api_endpoint)"
+    echo "无需重启 Xray。"
+  else
+    warn "API 服务未正常运行，请检查：systemctl status vvr-traffic-api.service --no-pager"
+  fi
 }
 
 traffic_status() {
@@ -1810,6 +1979,7 @@ server_timezone() {
 
 configure_server_timezone() {
   local timezone answer input
+  MENU_RETURNED=0
   if ! command -v timedatectl >/dev/null 2>&1; then
     warn "未找到 timedatectl，无法通过管理菜单修改服务器时区。"
     echo "请手动安装 systemd 或执行：ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime"
@@ -1829,7 +1999,7 @@ configure_server_timezone() {
       2) timezone='UTC' ;;
       3) timezone='Europe/London' ;;
       4) timezone='America/Los_Angeles' ;;
-      0) return ;;
+      0) MENU_RETURNED=1; return ;;
       *) echo "无效选择，请输入 0-4。"; continue ;;
     esac
     if timedatectl list-timezones 2>/dev/null | grep -Fxq "${timezone}"; then
@@ -1854,12 +2024,14 @@ configure_server_timezone() {
 
 manage_traffic() {
   local input
+  MENU_RETURNED=0
   while :; do
     clear 2>/dev/null || true
     echo "=============================="
     echo " 流量统计与 MiSub API"
     echo "=============================="
-    echo " API 地址：127.0.0.1:18080/api/traffic"
+    echo " API 监听：$(traffic_api_binding_label)"
+    echo " API 地址：$(traffic_api_endpoint)"
     echo " 自动采集：每分钟一次；$(traffic_schedule_label)自动开始新周期"
     echo " 1. 查看当前流量"
     echo " 2. 立即采集一次"
@@ -1867,6 +2039,7 @@ manage_traffic() {
     echo " 4. 查看 MiSub API 信息"
     echo " 5. 设置每月重置时间"
     echo " 6. 修改服务器时区（当前：$(server_timezone)）"
+    echo " 7. 设置 API 访问方式"
     echo " 0. 返回主菜单"
     echo
     printf '请选择操作: '
@@ -1876,12 +2049,38 @@ manage_traffic() {
       2) traffic_collect_now ;;
       3) traffic_reset ;;
       4)
-        echo "接口：http://127.0.0.1:18080/api/traffic"
+        load_traffic_api_settings
+        echo "监听地址：${TRAFFIC_API_HOST}:18080"
+        echo "接口：$(traffic_api_endpoint)"
         echo "令牌：$(cat "${CONFIG_DIR}/vvr-traffic.token" 2>/dev/null || echo '未生成')"
-        echo "说明：接口仅监听本机，请通过反向代理安全转发给 MiSub。"
+        echo "安全说明：接口使用普通 HTTP，访问时必须携带令牌。"
+        if [ "${TRAFFIC_API_HOST}" = "0.0.0.0" ]; then
+          echo "当前已允许 IP 访问，请确认防火墙仅放行可信来源；生产环境建议使用 HTTPS 反向代理。"
+        else
+          echo "当前仅监听本机；部署在 Cloudflare Workers 的 MiSub 建议通过 HTTPS 反向代理访问。"
+        fi
         ;;
-      5) configure_traffic_schedule ;;
-      6) configure_server_timezone ;;
+      5)
+        configure_traffic_schedule
+        if [ "${MENU_RETURNED:-0}" -eq 1 ]; then
+          MENU_RETURNED=0
+          continue
+        fi
+        ;;
+      6)
+        configure_server_timezone
+        if [ "${MENU_RETURNED:-0}" -eq 1 ]; then
+          MENU_RETURNED=0
+          continue
+        fi
+        ;;
+      7)
+        configure_traffic_api
+        if [ "${MENU_RETURNED:-0}" -eq 1 ]; then
+          MENU_RETURNED=0
+          continue
+        fi
+        ;;
       0) return ;;
       *) echo "无效选择，请重新输入。" ;;
     esac
@@ -2208,7 +2407,13 @@ EOF
 }
 
 print_result() {
-  local host uri
+  local host uri api_host
+  api_host="127.0.0.1"
+  if [ -f "${TRAFFIC_API_SETTINGS_FILE}" ]; then
+    # shellcheck disable=SC1090
+    . "${TRAFFIC_API_SETTINGS_FILE}"
+    api_host="${VVR_TRAFFIC_API_HOST:-127.0.0.1}"
+  fi
   if [ -n "${SERVER_IPV4}" ]; then
     host="${SERVER_IPV4}"
   elif [ -n "${SERVER_IPV6}" ]; then
@@ -2221,7 +2426,16 @@ print_result() {
   ok "Xray VLESS Reality 节点安装完成。"
   echo "配置文件：${CONFIG_FILE}"
   echo "管理菜单：vvr"
-  echo "流量 API：127.0.0.1:18080/api/traffic（令牌见 /etc/xray/vvr-traffic.token）"
+  if [ "${api_host}" = "0.0.0.0" ]; then
+    if [ -n "${SERVER_IPV4}" ]; then
+      echo "流量 API：http://${SERVER_IPV4}:18080/api/traffic（令牌见 /etc/xray/vvr-traffic.token）"
+    else
+      echo "流量 API：http://服务器IPv4地址:18080/api/traffic（令牌见 /etc/xray/vvr-traffic.token）"
+    fi
+    echo "注意：API 当前允许 IPv4 访问，请按需配置防火墙，生产环境建议使用 HTTPS 反向代理。"
+  else
+    echo "流量 API：http://127.0.0.1:18080/api/traffic（令牌见 /etc/xray/vvr-traffic.token）"
+  fi
   echo "服务状态：systemctl status xray --no-pager"
   echo "日志查看：journalctl -u xray -f"
   echo
