@@ -1510,6 +1510,7 @@ prompt_fallback_limit() {
 
 configure_fallback() {
   local input default
+  MENU_RETURNED=0
   case "${FALLBACK_MODE}" in
     protected) default=2 ;;
     *) default=1 ;;
@@ -1519,11 +1520,16 @@ configure_fallback() {
   echo "Reality 回落设置："
   echo "  1. 普通：无效连接直接回落到 ${SNI}:443。"
   echo "  2. 高级：经本机 Tunnel 回落，仅允许 ${SNI}，其他 SNI 丢弃。"
+  echo "  0. 返回主菜单"
   while :; do
     printf '选择回落模式 [%s]: ' "${default}"
     read -r input
 
     case "${input:-${default}}" in
+    0)
+      MENU_RETURNED=1
+      return
+      ;;
     1)
       FALLBACK_MODE="direct"
       FALLBACK_PORT=""
@@ -2424,6 +2430,19 @@ traffic_api_endpoint() {
   fi
 }
 
+traffic_xui_base_endpoint() {
+  load_traffic_api_settings
+  if [ "${TRAFFIC_API_HOST}" = "0.0.0.0" ]; then
+    if [ -n "${SERVER_IPV4:-}" ]; then
+      printf 'http://%s:18080' "${SERVER_IPV4}"
+    else
+      printf 'http://服务器IPv4地址:18080'
+    fi
+  else
+    printf 'http://127.0.0.1:18080'
+  fi
+}
+
 traffic_xui_endpoint() {
   load_traffic_api_settings
   if [ "${TRAFFIC_API_HOST}" = "0.0.0.0" ]; then
@@ -2583,7 +2602,8 @@ manage_traffic() {
     traffic_menu_summary
     echo
     echo " API 监听：$(traffic_api_binding_label)"
-    echo " API 地址：$(traffic_api_endpoint)"
+    echo " VVR 内部统计接口：$(traffic_api_endpoint)"
+    echo " MiSub 面板地址（请填写此地址）：$(traffic_xui_base_endpoint)"
     echo " 自动采集：$(traffic_auto_collection_label)；$(traffic_schedule_label)自动开始新周期"
     traffic_collection_status
     echo " 1. 查看当前流量"
@@ -2605,8 +2625,10 @@ manage_traffic() {
       4)
         load_traffic_api_settings
         echo "监听地址：${TRAFFIC_API_HOST}:18080"
-        echo "接口：$(traffic_api_endpoint)"
-        echo "MiSub 3X-UI 兼容接口：$(traffic_xui_endpoint)"
+        echo "VVR 内部统计接口（vvr 命令使用）：$(traffic_api_endpoint)"
+        echo "MiSub 面板地址（面板中填写此地址）：$(traffic_xui_base_endpoint)"
+        echo "MiSub 3X-UI 兼容接口（实际请求）：$(traffic_xui_endpoint)"
+        echo "兼容接口路径：GET /panel/api/inbounds/list；POST /panel/api/inbounds/resetAllTraffics"
         echo "令牌：$(cat "${CONFIG_DIR}/vvr-traffic.token" 2>/dev/null || echo '未生成')"
         echo "认证方式：Authorization: Bearer <令牌>（旧接口仍支持 ?token=<令牌>）"
         echo "入站 ID：1（MiSub 面板配置可留空，或填写 1）"
@@ -2878,6 +2900,7 @@ modify_sni() { load_state; prompt_sni; apply_config; }
 modify_tag() { load_state; prompt_tag; apply_config; }
 modify_inbound_mode() {
   local input next_mode default_option current_label ipv4_display ipv6_display
+  MENU_RETURNED=0
   load_state
   refresh_network_status
   ipv4_display="${IPV4_ADDRESS:-未检测到公网地址}"
@@ -2897,7 +2920,7 @@ modify_inbound_mode() {
     case "${input:-${default_option}}" in
       1) next_mode="ipv4"; break ;;
       2) next_mode="ipv6"; break ;;
-      0) return ;;
+      0) MENU_RETURNED=1; return ;;
       *) echo "无效的节点入站选择，请输入 0、1 或 2。" ;;
     esac
   done
@@ -2908,7 +2931,7 @@ modify_inbound_mode() {
         warn "当前检测不到公网 IPv4；切换后新链接可能无法连接。"
         printf '仍要切换到 IPv4 入站吗？[y/N]: '
         read -r input
-        case "${input}" in y|Y|yes|YES) ;; *) echo "已取消切换。"; return ;; esac
+        case "${input}" in y|Y|yes|YES) ;; *) echo "已取消切换。"; MENU_RETURNED=1; return ;; esac
       fi
       [ -n "${IPV4_ADDRESS}" ] && SERVER_IPV4="${IPV4_ADDRESS}"
       ;;
@@ -2917,7 +2940,7 @@ modify_inbound_mode() {
         warn "当前检测不到公网 IPv6；切换后新链接可能无法连接。"
         printf '仍要切换到 IPv6 入站吗？[y/N]: '
         read -r input
-        case "${input}" in y|Y|yes|YES) ;; *) echo "已取消切换。"; return ;; esac
+        case "${input}" in y|Y|yes|YES) ;; *) echo "已取消切换。"; MENU_RETURNED=1; return ;; esac
       fi
       [ -n "${IPV6_ADDRESS}" ] && SERVER_IPV6="${IPV6_ADDRESS}"
       ;;
@@ -2942,6 +2965,7 @@ modify_fallback() {
     old_fallback_mode="${FALLBACK_MODE}"
     old_fallback_port="${FALLBACK_PORT}"
     configure_fallback
+    [ "${MENU_RETURNED:-0}" -eq 1 ] && return
     if [ "${FALLBACK_MODE}" = "protected" ] && { [ "${FALLBACK_MODE}" != "${old_fallback_mode}" ] || [ "${FALLBACK_PORT}" != "${old_fallback_port}" ]; }; then
       if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${FALLBACK_PORT}$"; then
         echo "Tunnel 端口 ${FALLBACK_PORT} 已被占用，请换一个端口。"
@@ -3041,9 +3065,13 @@ main() {
     case "${choice}" in
       7|8) ;;
       *)
-        echo
-        printf '按回车返回菜单...'
-        read -r _
+        if [ "${MENU_RETURNED:-0}" -eq 1 ]; then
+          MENU_RETURNED=0
+        else
+          echo
+          printf '按回车返回菜单...'
+          read -r _
+        fi
         ;;
     esac
   done
@@ -3080,15 +3108,22 @@ print_result() {
   echo "节点入站：${inbound_label}"
   if [ "${api_host}" = "0.0.0.0" ]; then
     if [ -n "${SERVER_IPV4}" ]; then
-      echo "流量 API：http://${SERVER_IPV4}:18080/api/traffic（令牌见 /etc/xray/vvr-traffic.token）"
+      echo "VVR 内部统计接口：http://${SERVER_IPV4}:18080/api/traffic（vvr 命令使用，令牌见 /etc/xray/vvr-traffic.token）"
+      echo "MiSub 面板地址（请填写此地址）：http://${SERVER_IPV4}:18080"
+      echo "MiSub 3X-UI 兼容接口：http://${SERVER_IPV4}:18080/panel/api/inbounds/list"
     else
-      echo "流量 API：http://服务器IPv4地址:18080/api/traffic（令牌见 /etc/xray/vvr-traffic.token）"
+      echo "VVR 内部统计接口：http://服务器IPv4地址:18080/api/traffic（vvr 命令使用，令牌见 /etc/xray/vvr-traffic.token）"
+      echo "MiSub 面板地址（请填写此地址）：http://服务器IPv4地址:18080"
+      echo "MiSub 3X-UI 兼容接口：http://服务器IPv4地址:18080/panel/api/inbounds/list"
     fi
     echo "注意：API 当前允许 IPv4 访问，请按需配置防火墙，生产环境建议使用 HTTPS 反向代理。"
   else
-    echo "流量 API：http://127.0.0.1:18080/api/traffic（令牌见 /etc/xray/vvr-traffic.token）"
+    echo "VVR 内部统计接口：http://127.0.0.1:18080/api/traffic（vvr 命令使用，令牌见 /etc/xray/vvr-traffic.token）"
+    echo "MiSub 面板地址（当前仅本机可用）：http://127.0.0.1:18080"
+    echo "MiSub 3X-UI 兼容接口：http://127.0.0.1:18080/panel/api/inbounds/list"
+    echo "注意：API 当前仅监听 127.0.0.1，远程 MiSub 无法直接访问；请在 vvr 管理菜单中设置为 0.0.0.0，或使用 HTTPS 反向代理。"
   fi
-  echo "MiSub 兼容接口：请将面板地址配置为上述主机的 http(s)://主机:18080，入站 ID 可留空或填写 1。"
+  echo "MiSub 配置：面板地址填写上面的“MiSub 面板地址”，入站 ID 可留空或填写 1。"
   echo "MiSub 请求认证：Authorization: Bearer <令牌>。"
   echo "服务状态：systemctl status xray --no-pager"
   echo "日志查看：journalctl -u xray -f"
