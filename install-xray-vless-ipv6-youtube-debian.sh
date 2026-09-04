@@ -1405,6 +1405,7 @@ manage_outbound_strategy() {
   local input
   load_state
   ensure_routes_file
+  refresh_network_status
   while :; do
     clear 2>/dev/null || true
     echo "=============================="
@@ -1518,7 +1519,7 @@ ensure_tcpdump() {
 }
 
 capture_outbound_connections() {
-  local input filter label status
+  local input filter label
   ensure_tcpdump || return
   while :; do
     echo
@@ -1537,29 +1538,20 @@ capture_outbound_connections() {
       *) echo "无效选择，请重新输入。"; continue ;;
     esac
     echo
-    echo "即将监听 ${label} HTTPS 连接，最长 90 秒，可按 Ctrl+C 提前结束。"
+    echo "即将监听 ${label} HTTPS 连接，按回车结束监听并返回上一级。"
     echo "请关注 VPS 对外连接（VPS 地址.临时端口 > 目标地址.443）。"
     echo "客户端 > VPS:443 属于入站 VLESS 流量，不代表代理出站。"
     echo
-    if command -v timeout >/dev/null 2>&1; then
-      if timeout 90 tcpdump -ni any -nn -l "${filter}"; then
-        :
-      else
-        status=$?
-        case "${status}" in
-          124|130) : ;;
-          *) warn "tcpdump 已结束，退出码：${status}" ;;
-        esac
-      fi
-    else
-      echo "未找到 timeout，将由你按 Ctrl+C 结束抓包。"
-      if tcpdump -ni any -nn -l "${filter}"; then
-        :
-      else
-        status=$?
-        [ "${status}" -eq 130 ] || warn "tcpdump 已结束，退出码：${status}"
-      fi
-    fi
+    CAPTURE_PID=""
+    trap 'if [ -n "${CAPTURE_PID:-}" ]; then kill "${CAPTURE_PID}" >/dev/null 2>&1 || true; fi' INT TERM HUP
+    tcpdump -ni any -nn -l "${filter}" &
+    CAPTURE_PID=$!
+    printf '监听中，按回车结束: '
+    read -r _ || true
+    kill "${CAPTURE_PID}" >/dev/null 2>&1 || true
+    wait "${CAPTURE_PID}" >/dev/null 2>&1 || true
+    CAPTURE_PID=""
+    trap - INT TERM HUP
     return
   done
 }
@@ -1659,7 +1651,7 @@ RULE
     esac
   done
 
-  TEST_CONFIG="$(mktemp /tmp/vvr-route-test.XXXXXX)"
+  TEST_CONFIG="$(mktemp /tmp/vvr-route-test.XXXXXX.json)"
   TEST_ACCESS_LOG="${TEST_CONFIG}.access"
   TEST_ERROR_LOG="${TEST_CONFIG}.error"
   TEST_RUNTIME_LOG="${TEST_CONFIG}.runtime"
@@ -2199,9 +2191,14 @@ main() {
       0) exit 0 ;;
       *) echo "无效选择，请重新输入。" ;;
     esac
-    echo
-    printf '按回车返回菜单...'
-    read -r _
+    case "${choice}" in
+      6|7) ;;
+      *)
+        echo
+        printf '按回车返回菜单...'
+        read -r _
+        ;;
+    esac
   done
 }
 
