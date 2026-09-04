@@ -1600,7 +1600,7 @@ cleanup_rule_test() {
     kill "${TEST_PID}" >/dev/null 2>&1 || true
     wait "${TEST_PID}" 2>/dev/null || true
   fi
-  rm -f "${TEST_CONFIG:-}" "${TEST_ACCESS_LOG:-}" "${TEST_ERROR_LOG:-}" "${TEST_RUNTIME_LOG:-}" "${TEST_CHECK_LOG:-}" "${TEST_PACKET_LOG:-}"
+  rm -f "${TEST_CONFIG:-}" "${TEST_ACCESS_LOG:-}" "${TEST_ERROR_LOG:-}" "${TEST_RUNTIME_LOG:-}" "${TEST_CHECK_LOG:-}" "${TEST_PACKET_LOG:-}" "${TEST_PACKET_ERROR_LOG:-}"
   TEST_CAPTURE_PID=""
   TEST_PID=""
 }
@@ -1674,6 +1674,7 @@ test_selected_outbound_rule() {
   TEST_RUNTIME_LOG="${TEST_CONFIG}.runtime"
   TEST_CHECK_LOG="${TEST_CONFIG}.check"
   TEST_PACKET_LOG="${TEST_CONFIG}.packets"
+  TEST_PACKET_ERROR_LOG="${TEST_CONFIG}.packets.error"
   TEST_PID=""
   TEST_CAPTURE_PID=""
   trap 'cleanup_rule_test' INT TERM HUP
@@ -1700,14 +1701,20 @@ test_selected_outbound_rule() {
     return
   fi
   actual_ip_family=""
+  TEST_CAPTURE_ENABLED=0
   if command -v tcpdump >/dev/null 2>&1; then
     case "${test_url}" in
       http://*) target_port=80 ;;
       *) target_port=443 ;;
     esac
-    tcpdump -ni any -nn -l "tcp and port ${target_port} and (tcp[tcpflags] & tcp-syn != 0)" >"${TEST_PACKET_LOG}" 2>&1 &
+    tcpdump -ni any -nn -U -l "tcp and port ${target_port}" >"${TEST_PACKET_LOG}" 2>"${TEST_PACKET_ERROR_LOG}" &
     TEST_CAPTURE_PID=$!
     sleep 1
+    if kill -0 "${TEST_CAPTURE_PID}" >/dev/null 2>&1; then
+      TEST_CAPTURE_ENABLED=1
+    else
+      TEST_CAPTURE_PID=""
+    fi
   fi
   request_ok=1
   if ! http_code="$(curl -sS --proxy "socks5h://127.0.0.1:${TEST_PORT}" --connect-timeout 8 --max-time 20 -o /dev/null -w '%{http_code}' "${test_url}" 2>&1)"; then
@@ -1732,8 +1739,11 @@ test_selected_outbound_rule() {
   case "${actual_ip_family}" in
     IPv4|IPv6) echo "最终使用 IP：${actual_ip_family}（由测试期间 tcpdump 抓包确认）" ;;
     *)
-      if command -v tcpdump >/dev/null 2>&1; then
-        warn "未能从抓包结果确认最终使用 IPv4 还是 IPv6，请使用实时抓包进一步检查。"
+      if [ "${TEST_CAPTURE_ENABLED}" -eq 1 ]; then
+        warn "测试窗口内未抓到目标 TCP 连接，无法确认最终使用 IPv4 还是 IPv6。"
+      elif command -v tcpdump >/dev/null 2>&1; then
+        warn "tcpdump 未能启动，无法确认最终使用 IPv4 还是 IPv6。"
+        [ -s "${TEST_PACKET_ERROR_LOG}" ] && cat "${TEST_PACKET_ERROR_LOG}"
       else
         echo "最终使用 IP：未确认（系统未安装 tcpdump；当前仅显示出站策略）"
       fi
