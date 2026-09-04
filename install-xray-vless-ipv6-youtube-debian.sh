@@ -681,27 +681,27 @@ def collect(force=False):
     period = period_key()
     settings = reset_settings()
     db = db_connect()
-    row = db.execute("SELECT month,total_up,total_down,last_up,last_down FROM traffic WHERE id=1").fetchone()
+    row = db.execute("SELECT month,total_up,total_down,last_up,last_down,updated_at FROM traffic WHERE id=1").fetchone()
     if not settings["collection_enabled"] and not force:
         if row is None or row[0] != period:
-            result = {"month": period[:7], "period_start": period, "up": 0, "down": 0, "total": 0, "updated_at": now, "collection_enabled": False}
+            result = {"month": period[:7], "period_start": period, "up": 0, "down": 0, "total": 0, "updated_at": "暂无", "collection_enabled": False}
         else:
-            result = {"month": period[:7], "period_start": period, "up": row[1], "down": row[2], "total": row[1] + row[2], "updated_at": now, "collection_enabled": False}
+            result = {"month": period[:7], "period_start": period, "up": row[1], "down": row[2], "total": row[1] + row[2], "updated_at": row[5], "collection_enabled": False}
         db.close()
         return result
     up, down = xray_stats()
     if up is None or down is None:
         if row is None or row[0] != period:
-            result = {"month": period[:7], "period_start": period, "up": 0, "down": 0, "total": 0, "updated_at": now, "collection_enabled": settings["collection_enabled"]}
+            result = {"month": period[:7], "period_start": period, "up": 0, "down": 0, "total": 0, "updated_at": "暂无", "collection_enabled": settings["collection_enabled"]}
         else:
-            result = {"month": period[:7], "period_start": period, "up": row[1], "down": row[2], "total": row[1] + row[2], "updated_at": now, "collection_enabled": settings["collection_enabled"]}
+            result = {"month": period[:7], "period_start": period, "up": row[1], "down": row[2], "total": row[1] + row[2], "updated_at": row[5], "collection_enabled": settings["collection_enabled"]}
         db.close()
         return result
     if row is None or row[0] != period:
         total_up = total_down = 0
         last_up = last_down = 0
     else:
-        _, total_up, total_down, last_up, last_down = row
+        _, total_up, total_down, last_up, last_down, _ = row
     delta_up = up - last_up if up >= last_up else up
     delta_down = down - last_down if down >= last_down else down
     total_up += max(delta_up, 0)
@@ -1911,6 +1911,58 @@ traffic_collection_status() {
   fi
 }
 
+traffic_format_bytes() {
+  awk -v bytes="${1:-0}" 'BEGIN {
+    if (bytes < 1024) printf "%.0f B", bytes
+    else if (bytes < 1048576) printf "%.2f KiB", bytes / 1024
+    else if (bytes < 1073741824) printf "%.2f MiB", bytes / 1048576
+    else if (bytes < 1099511627776) printf "%.2f GiB", bytes / 1073741824
+    else printf "%.2f TiB", bytes / 1099511627776
+  }'
+}
+
+traffic_print_payload() {
+  local payload parsed month period_start up down total updated_at collection_enabled
+  payload="$1"
+  parsed="$(printf '%s' "${payload}" | /usr/bin/python3 -c 'import json,sys; d=json.load(sys.stdin); print("|".join(str(d.get(k, "")) for k in ("month", "period_start", "up", "down", "total", "updated_at", "collection_enabled")))' 2>/dev/null || true)"
+  [ -n "${parsed}" ] || return 1
+  IFS='|' read -r month period_start up down total updated_at collection_enabled <<DATA
+${parsed}
+DATA
+  case "${collection_enabled}" in
+    True|true|1) collection_enabled='已开启' ;;
+    *) collection_enabled='已关闭' ;;
+  esac
+  echo "统计周期：${period_start:-${month:-未知}}"
+  echo "上传流量：$(traffic_format_bytes "${up:-0}")"
+  echo "下载流量：$(traffic_format_bytes "${down:-0}")"
+  echo "总流量：  $(traffic_format_bytes "${total:-0}")"
+  echo "数据更新时间：${updated_at:-暂无}"
+  echo "采集开关：${collection_enabled}"
+}
+
+traffic_fetch_and_display() {
+  local token payload
+  token="$(cat "${CONFIG_DIR}/vvr-traffic.token" 2>/dev/null || true)"
+  payload="$(curl -fsS --max-time 5 "http://127.0.0.1:18080/api/traffic?token=${token}" 2>/dev/null || true)"
+  [ -n "${payload}" ] || { warn "暂时无法读取流量统计，请检查 API 服务。"; return 1; }
+  traffic_print_payload "${payload}" || { warn "流量 API 返回的数据格式无法识别。"; return 1; }
+}
+
+traffic_menu_summary() {
+  local token payload
+  if ! systemctl is-active --quiet vvr-traffic-api.service; then
+    echo "流量概览：API 服务未运行"
+    return 0
+  fi
+  token="$(cat "${CONFIG_DIR}/vvr-traffic.token" 2>/dev/null || true)"
+  payload="$(curl -fsS --max-time 3 "http://127.0.0.1:18080/api/traffic?token=${token}" 2>/dev/null || true)"
+  if [ -n "${payload}" ] && traffic_print_payload "${payload}"; then
+    return 0
+  fi
+  echo "流量概览：暂时无法读取"
+}
+
 configure_traffic_schedule() {
   local input day hour minute
   MENU_RETURNED=0
@@ -2091,8 +2143,7 @@ traffic_status() {
     warn "流量 API 服务未运行。"
   fi
   traffic_collection_status
-  curl -fsS --max-time 5 "http://127.0.0.1:18080/api/traffic?token=$(cat "${CONFIG_DIR}/vvr-traffic.token" 2>/dev/null || true)" || warn "暂时无法读取流量统计。"
-  echo
+  traffic_fetch_and_display || true
 }
 
 traffic_collect_now() {
@@ -2176,6 +2227,9 @@ manage_traffic() {
     echo "=============================="
     echo " 流量统计与 MiSub API"
     echo "=============================="
+    echo " 流量概览"
+    traffic_menu_summary
+    echo
     echo " API 监听：$(traffic_api_binding_label)"
     echo " API 地址：$(traffic_api_endpoint)"
     echo " 自动采集：$(traffic_auto_collection_label)；$(traffic_schedule_label)自动开始新周期"
