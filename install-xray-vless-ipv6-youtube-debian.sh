@@ -131,27 +131,28 @@ prompt_values() {
   read -r input
   TAG="${input:-${DEFAULT_TAG}}"
 
-  prompt_fallback_mode
-  prompt_base_outbound_mode
-
   SERVER_IPV4="$(curl -4 -fsS --max-time 8 https://api.ipify.org 2>/dev/null || true)"
   SERVER_IPV6="$(curl -6 -fsS --max-time 8 https://api64.ipify.org 2>/dev/null || true)"
   prompt_inbound_mode
+  prompt_fallback_mode
+  prompt_base_outbound_mode
   confirm_initial_base_outbound
 }
 
 prompt_inbound_mode() {
-  local input
+  local input ipv4_display ipv6_display
+  case "${SERVER_IPV4}" in *.*.*.*) ipv4_display="${SERVER_IPV4}" ;; *) ipv4_display="未检测到公网地址" ;; esac
+  case "${SERVER_IPV6}" in *:*) ipv6_display="${SERVER_IPV6}" ;; *) ipv6_display="未检测到公网地址" ;; esac
   echo
-  echo "节点入口协议（客户端连接到此协议的服务器地址）："
-  echo "  1. IPv4（监听 0.0.0.0）"
-  echo "  2. IPv6（监听 ::）"
-  printf '选择节点入口 [1]: '
+  echo "节点入站地址族（客户端连接到服务器所用的 IP 协议）："
+  echo "  1. IPv4：${ipv4_display}（监听 0.0.0.0）"
+  echo "  2. IPv6：${ipv6_display}（监听 ::）"
+  printf '选择节点入站 [1]: '
   read -r input
   case "${input:-1}" in
     1) INBOUND_MODE="ipv4" ;;
     2) INBOUND_MODE="ipv6" ;;
-    *) fail "无效的节点入口选择。" ;;
+    *) fail "无效的节点入站选择。" ;;
   esac
 
   case "${INBOUND_MODE}" in
@@ -159,10 +160,10 @@ prompt_inbound_mode() {
       case "${SERVER_IPV4}" in
         *.*.*.*) ;;
         *)
-          warn "当前检测不到公网 IPv4；IPv4 入口生成的链接可能无法连接。"
-          printf '仍要继续使用 IPv4 入口吗？[y/N]: '
+          warn "当前检测不到公网 IPv4；IPv4 入站生成的链接可能无法连接。"
+          printf '仍要继续使用 IPv4 入站吗？[y/N]: '
           read -r input
-          case "${input}" in y|Y|yes|YES) ;; *) fail "已取消，请选择 IPv6 入口或检查网络。" ;; esac
+          case "${input}" in y|Y|yes|YES) ;; *) fail "已取消，请选择 IPv6 入站或检查网络。" ;; esac
           ;;
       esac
       ;;
@@ -170,10 +171,10 @@ prompt_inbound_mode() {
       case "${SERVER_IPV6}" in
         *:*) ;;
         *)
-          warn "当前检测不到公网 IPv6；IPv6 入口生成的链接可能无法连接。"
-          printf '仍要继续使用 IPv6 入口吗？[y/N]: '
+          warn "当前检测不到公网 IPv6；IPv6 入站生成的链接可能无法连接。"
+          printf '仍要继续使用 IPv6 入站吗？[y/N]: '
           read -r input
-          case "${input}" in y|Y|yes|YES) ;; *) fail "已取消，请选择 IPv4 入口或检查网络。" ;; esac
+          case "${input}" in y|Y|yes|YES) ;; *) fail "已取消，请选择 IPv4 入站或检查网络。" ;; esac
           ;;
       esac
       ;;
@@ -440,7 +441,7 @@ write_config() {
   case "${INBOUND_MODE}" in
     ipv4) INBOUND_LISTEN="0.0.0.0" ;;
     ipv6) INBOUND_LISTEN="::" ;;
-    *) fail "节点入口模式无效。" ;;
+    *) fail "节点入站模式无效。" ;;
   esac
 
   if [ "${FALLBACK_MODE}" = "protected" ]; then
@@ -1276,7 +1277,7 @@ show_node() {
   echo
   echo "节点信息："
   echo "  服务器：${host}"
-  case "${INBOUND_MODE}" in ipv6) echo "  入口：  IPv6（::）" ;; *) echo "  入口：  IPv4（0.0.0.0）" ;; esac
+  case "${INBOUND_MODE}" in ipv6) echo "  入站：  IPv6（::）" ;; *) echo "  入站：  IPv4（0.0.0.0）" ;; esac
   echo "  端口：  ${PORT}"
   echo "  SNI：   ${SNI}"
   echo "  名称：  ${TAG}"
@@ -2586,7 +2587,7 @@ write_config() {
   case "${INBOUND_MODE}" in
     ipv4) INBOUND_LISTEN="0.0.0.0" ;;
     ipv6) INBOUND_LISTEN="::" ;;
-    *) fail "节点入口模式无效。" ;;
+    *) fail "节点入站模式无效。" ;;
   esac
 
   if [ "${FALLBACK_MODE}" = "protected" ]; then
@@ -2762,32 +2763,34 @@ modify_port() {
 modify_sni() { load_state; prompt_sni; apply_config; }
 modify_tag() { load_state; prompt_tag; apply_config; }
 modify_inbound_mode() {
-  local input next_mode default_option current_label
+  local input next_mode default_option current_label ipv4_display ipv6_display
   load_state
   refresh_network_status
+  ipv4_display="${IPV4_ADDRESS:-未检测到公网地址}"
+  ipv6_display="${IPV6_ADDRESS:-未检测到公网地址}"
   case "${INBOUND_MODE}" in
-    ipv6) default_option="2"; current_label="IPv6（::）" ;;
-    *) default_option="1"; current_label="IPv4（0.0.0.0）" ;;
+    ipv6) default_option="2"; current_label="IPv6：${ipv6_display}（监听 ::）" ;;
+    *) default_option="1"; current_label="IPv4：${ipv4_display}（监听 0.0.0.0）" ;;
   esac
   echo
-  echo "当前节点入口：${current_label}"
-  echo "  1. IPv4（监听 0.0.0.0）"
-  echo "  2. IPv6（监听 ::）"
+  echo "当前节点入站：${current_label}"
+  echo "  1. IPv4：${ipv4_display}（监听 0.0.0.0）"
+  echo "  2. IPv6：${ipv6_display}（监听 ::）"
   echo "  0. 返回主菜单"
-  printf '选择节点入口 [%s]: ' "${default_option}"
+  printf '选择节点入站 [%s]: ' "${default_option}"
   read -r input
   case "${input:-${default_option}}" in
     1) next_mode="ipv4" ;;
     2) next_mode="ipv6" ;;
     0) return ;;
-    *) echo "无效的节点入口选择。"; return ;;
+    *) echo "无效的节点入站选择。"; return ;;
   esac
 
   case "${next_mode}" in
     ipv4)
       if [ "${IPV4_STATUS}" != "available" ]; then
         warn "当前检测不到公网 IPv4；切换后新链接可能无法连接。"
-        printf '仍要切换到 IPv4 入口吗？[y/N]: '
+        printf '仍要切换到 IPv4 入站吗？[y/N]: '
         read -r input
         case "${input}" in y|Y|yes|YES) ;; *) echo "已取消切换。"; return ;; esac
       fi
@@ -2796,7 +2799,7 @@ modify_inbound_mode() {
     ipv6)
       if [ "${IPV6_STATUS}" != "available" ]; then
         warn "当前检测不到公网 IPv6；切换后新链接可能无法连接。"
-        printf '仍要切换到 IPv6 入口吗？[y/N]: '
+        printf '仍要切换到 IPv6 入站吗？[y/N]: '
         read -r input
         case "${input}" in y|Y|yes|YES) ;; *) echo "已取消切换。"; return ;; esac
       fi
@@ -2805,12 +2808,12 @@ modify_inbound_mode() {
   esac
 
   if [ "${next_mode}" = "${INBOUND_MODE}" ]; then
-    echo "节点入口未改变。"
+    echo "节点入站未改变。"
     show_node
     return
   fi
 
-  warn "切换入口会短暂重启 Xray；旧入口地址将不再可用。"
+  warn "切换入站会短暂重启 Xray；旧入站地址将不再可用。"
   INBOUND_MODE="${next_mode}"
   apply_config
   show_node
@@ -2878,7 +2881,7 @@ show_menu() {
   echo " 2. 修改监听端口"
   echo " 3. 修改 Reality SNI"
   echo " 4. 修改节点名称"
-  echo " 5. 切换节点入口 IPv4/IPv6"
+  echo " 5. 切换节点入站 IPv4/IPv6"
   echo " 6. 配置 Reality 回落与限速"
   echo " 7. 管理出站策略（基础：$(outbound_mode_label "${BASE_OUTBOUND_MODE}")）"
   echo " 8. 流量统计与 MiSub API"
@@ -2953,7 +2956,7 @@ print_result() {
   ok "Xray VLESS Reality 节点安装完成。"
   echo "配置文件：${CONFIG_FILE}"
   echo "管理菜单：vvr"
-  echo "节点入口：${inbound_label}"
+  echo "节点入站：${inbound_label}"
   if [ "${api_host}" = "0.0.0.0" ]; then
     if [ -n "${SERVER_IPV4}" ]; then
       echo "流量 API：http://${SERVER_IPV4}:18080/api/traffic（令牌见 /etc/xray/vvr-traffic.token）"
