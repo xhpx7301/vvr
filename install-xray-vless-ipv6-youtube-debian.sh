@@ -112,77 +112,100 @@ download_xray() {
 
 prompt_values() {
   local input
-  printf '监听端口 [%s]: ' "${DEFAULT_PORT}"
-  read -r input
-  PORT="${input:-${DEFAULT_PORT}}"
-  case "${PORT}" in
-    ''|*[!0-9]*) fail "端口无效。" ;;
-  esac
-  [ "${PORT}" -ge 1 ] && [ "${PORT}" -le 65535 ] || fail "端口无效。"
+  while :; do
+    printf '监听端口 [%s]: ' "${DEFAULT_PORT}"
+    read -r input
+    PORT="${input:-${DEFAULT_PORT}}"
+    case "${PORT}" in
+      ''|*[!0-9]*) echo "端口无效，请输入 1 到 65535 的数字。"; continue ;;
+    esac
+    if [ "${PORT}" -lt 1 ] || [ "${PORT}" -gt 65535 ]; then
+      echo "端口无效，请输入 1 到 65535 的数字。"
+      continue
+    fi
+    break
+  done
 
-  printf 'Reality SNI [%s]: ' "${DEFAULT_SNI}"
-  read -r input
-  SNI="${input:-${DEFAULT_SNI}}"
-  case "${SNI}" in
-    ''|*[!A-Za-z0-9.-]*) fail "SNI 格式无效。" ;;
-  esac
+  while :; do
+    printf 'Reality SNI [%s]: ' "${DEFAULT_SNI}"
+    read -r input
+    SNI="${input:-${DEFAULT_SNI}}"
+    case "${SNI}" in
+      ''|*[!A-Za-z0-9.-]*) echo "SNI 格式无效，请重新输入。" ;;
+      *) break ;;
+    esac
+  done
 
-  printf '节点名称 [%s]: ' "${DEFAULT_TAG}"
-  read -r input
-  TAG="${input:-${DEFAULT_TAG}}"
+  while :; do
+    printf '节点名称 [%s]: ' "${DEFAULT_TAG}"
+    read -r input
+    TAG="${input:-${DEFAULT_TAG}}"
+    case "${TAG}" in
+      ''|*[!A-Za-z0-9._-]*) echo "节点名称只能包含英文、数字、点、下划线和短横线。" ;;
+      *) break ;;
+    esac
+  done
 
   SERVER_IPV4="$(curl -4 -fsS --max-time 8 https://api.ipify.org 2>/dev/null || true)"
   SERVER_IPV6="$(curl -6 -fsS --max-time 8 https://api64.ipify.org 2>/dev/null || true)"
   prompt_inbound_mode
   prompt_fallback_mode
-  prompt_base_outbound_mode
-  confirm_initial_base_outbound
+  while :; do
+    prompt_base_outbound_mode
+    if confirm_initial_base_outbound; then
+      break
+    fi
+    echo "请重新选择基础出站模式。"
+  done
 }
 
 prompt_inbound_mode() {
   local input ipv4_display ipv6_display
   case "${SERVER_IPV4}" in *.*.*.*) ipv4_display="${SERVER_IPV4}" ;; *) ipv4_display="未检测到公网地址" ;; esac
   case "${SERVER_IPV6}" in *:*) ipv6_display="${SERVER_IPV6}" ;; *) ipv6_display="未检测到公网地址" ;; esac
-  echo
-  echo "节点入站地址族（客户端连接到服务器所用的 IP 协议）："
-  echo "  1. IPv4：${ipv4_display}（监听 0.0.0.0）"
-  echo "  2. IPv6：${ipv6_display}（监听 ::）"
-  printf '选择节点入站 [1]: '
-  read -r input
-  case "${input:-1}" in
-    1) INBOUND_MODE="ipv4" ;;
-    2) INBOUND_MODE="ipv6" ;;
-    *) fail "无效的节点入站选择。" ;;
-  esac
+  while :; do
+    echo
+    echo "节点入站地址族（客户端连接到服务器所用的 IP 协议）："
+    echo "  1. IPv4：${ipv4_display}（监听 0.0.0.0）"
+    echo "  2. IPv6：${ipv6_display}（监听 ::）"
+    printf '选择节点入站 [1]: '
+    read -r input
+    case "${input:-1}" in
+      1) INBOUND_MODE="ipv4" ;;
+      2) INBOUND_MODE="ipv6" ;;
+      *) echo "无效的节点入站选择，请输入 1 或 2。"; continue ;;
+    esac
 
-  case "${INBOUND_MODE}" in
-    ipv4)
-      case "${SERVER_IPV4}" in
-        *.*.*.*) ;;
-        *)
-          warn "当前检测不到公网 IPv4；IPv4 入站生成的链接可能无法连接。"
-          printf '仍要继续使用 IPv4 入站吗？[y/N]: '
-          read -r input
-          case "${input}" in y|Y|yes|YES) ;; *) fail "已取消，请选择 IPv6 入站或检查网络。" ;; esac
-          ;;
-      esac
-      ;;
-    ipv6)
-      case "${SERVER_IPV6}" in
-        *:*) ;;
-        *)
-          warn "当前检测不到公网 IPv6；IPv6 入站生成的链接可能无法连接。"
-          printf '仍要继续使用 IPv6 入站吗？[y/N]: '
-          read -r input
-          case "${input}" in y|Y|yes|YES) ;; *) fail "已取消，请选择 IPv4 入站或检查网络。" ;; esac
-          ;;
-      esac
-      ;;
-  esac
+    case "${INBOUND_MODE}" in
+      ipv4)
+        case "${SERVER_IPV4}" in
+          *.*.*.*) ;;
+          *)
+            warn "当前检测不到公网 IPv4；IPv4 入站生成的链接可能无法连接。"
+            printf '仍要继续使用 IPv4 入站吗？[y/N]: '
+            read -r input
+            case "${input}" in y|Y|yes|YES) ;; *) echo "请重新选择入站地址族。"; continue ;; esac
+            ;;
+        esac
+        ;;
+      ipv6)
+        case "${SERVER_IPV6}" in
+          *:*) ;;
+          *)
+            warn "当前检测不到公网 IPv6；IPv6 入站生成的链接可能无法连接。"
+            printf '仍要继续使用 IPv6 入站吗？[y/N]: '
+            read -r input
+            case "${input}" in y|Y|yes|YES) ;; *) echo "请重新选择入站地址族。"; continue ;; esac
+            ;;
+        esac
+        ;;
+    esac
+    break
+  done
 }
 
 confirm_initial_base_outbound() {
-  local answer
+  local answer input
   case "${BASE_OUTBOUND_MODE}" in
     ipv6)
       case "${SERVER_IPV6}" in
@@ -191,7 +214,7 @@ confirm_initial_base_outbound() {
           warn "当前检测不到 IPv6 出站；仅 IPv6 基础模式很可能无法访问目标。"
           printf '仍要继续使用仅 IPv6 吗？[y/N]: '
           read -r answer
-          case "${answer}" in y|Y|yes|YES) ;; *) fail "已取消，请选择其他基础出站模式。" ;; esac
+          case "${answer}" in y|Y|yes|YES) ;; *) return 1 ;; esac
           ;;
       esac
       ;;
@@ -202,7 +225,7 @@ confirm_initial_base_outbound() {
           warn "当前检测不到 IPv4 出站；仅 IPv4 基础模式很可能无法访问目标。"
           printf '仍要继续使用仅 IPv4 吗？[y/N]: '
           read -r answer
-          case "${answer}" in y|Y|yes|YES) ;; *) fail "已取消，请选择其他基础出站模式。" ;; esac
+          case "${answer}" in y|Y|yes|YES) ;; *) return 1 ;; esac
           ;;
       esac
       ;;
@@ -219,127 +242,169 @@ confirm_initial_base_outbound() {
       case "${SERVER_IPV6}" in *:*) ;; *) warn "IPv6 当前不可用，IPv6 优先连接竞速将由 IPv4 接管。" ;; esac
       ;;
   esac
-
+  while :; do
+    if ! command -v ss >/dev/null 2>&1 || ! ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${PORT}$"; then
+      break
+    fi
+    echo "端口 ${PORT} 已被占用，请换一个端口。"
+    while :; do
+      printf '监听端口 [%s]: ' "${PORT}"
+      read -r input
+      PORT="${input:-${PORT}}"
+      case "${PORT}" in
+        ''|*[!0-9]*) echo "端口无效，请输入 1 到 65535 的数字。"; continue ;;
+      esac
+      if [ "${PORT}" -lt 1 ] || [ "${PORT}" -gt 65535 ]; then
+        echo "端口无效，请输入 1 到 65535 的数字。"
+        continue
+      fi
+      if [ "${FALLBACK_MODE}" = "protected" ] && [ "${PORT}" = "${FALLBACK_PORT}" ]; then
+        echo "监听端口不能与 Tunnel 端口相同，请重新输入。"
+        continue
+      fi
+      break
+    done
+  done
 }
 
 prompt_base_outbound_mode() {
   local input
-
-  echo
-  echo "基础出站模式（未命中规则的流量使用此模式）："
-  echo "  1. 仅 IPv4"
-  echo "  2. 仅 IPv6"
-  echo "  3. IPv4 优先，IPv6 兜底"
-  echo "  4. IPv6 优先，IPv4 兜底"
-  echo "  5. IPv4 优先连接竞速（Happy Eyeballs）"
-  echo "  6. IPv6 优先连接竞速（Happy Eyeballs）"
-  printf '选择基础出站模式 [1]: '
-  read -r input
-  case "${input:-1}" in
-    1) BASE_OUTBOUND_MODE="ipv4" ;;
-    2) BASE_OUTBOUND_MODE="ipv6" ;;
-    3) BASE_OUTBOUND_MODE="ipv4v6" ;;
-    4) BASE_OUTBOUND_MODE="ipv6v4" ;;
-    5) BASE_OUTBOUND_MODE="happy4v6" ;;
-    6) BASE_OUTBOUND_MODE="happy6v4" ;;
-    *) fail "无效的基础出站模式。" ;;
-  esac
+  while :; do
+    echo
+    echo "基础出站模式（未命中规则的流量使用此模式）："
+    echo "  1. 仅 IPv4"
+    echo "  2. 仅 IPv6"
+    echo "  3. IPv4 优先，IPv6 兜底"
+    echo "  4. IPv6 优先，IPv4 兜底"
+    echo "  5. IPv4 优先连接竞速（Happy Eyeballs）"
+    echo "  6. IPv6 优先连接竞速（Happy Eyeballs）"
+    printf '选择基础出站模式 [1]: '
+    read -r input
+    case "${input:-1}" in
+      1) BASE_OUTBOUND_MODE="ipv4"; return ;;
+      2) BASE_OUTBOUND_MODE="ipv6"; return ;;
+      3) BASE_OUTBOUND_MODE="ipv4v6"; return ;;
+      4) BASE_OUTBOUND_MODE="ipv6v4"; return ;;
+      5) BASE_OUTBOUND_MODE="happy4v6"; return ;;
+      6) BASE_OUTBOUND_MODE="happy6v4"; return ;;
+      *) echo "无效的基础出站模式，请输入 1 到 6。" ;;
+    esac
+  done
 }
 
 prompt_fallback_mode() {
   local input
+  while :; do
+    echo
+    echo "Reality 回落模式："
+    echo "  1. 普通：无效连接直接回落到 ${SNI}:443。"
+    echo "  2. 高级：经本机 Tunnel 回落，仅允许 ${SNI}，其他 SNI 丢弃。"
+    printf '选择回落模式 [1]: '
+    read -r input
 
-  echo
-  echo "Reality 回落模式："
-  echo "  1. 普通：无效连接直接回落到 ${SNI}:443。"
-  echo "  2. 高级：经本机 Tunnel 回落，仅允许 ${SNI}，其他 SNI 丢弃。"
-  printf '选择回落模式 [1]: '
-  read -r input
-
-  case "${input:-1}" in
-    1)
-      FALLBACK_MODE="direct"
-      REALITY_DEST="${SNI}:443"
-      FALLBACK_PORT=""
-      FALLBACK_LIMIT_MODE="disabled"
-      FALLBACK_LIMIT_AFTER_BYTES=""
-      FALLBACK_LIMIT_UPLOAD_BPS=""
-      FALLBACK_LIMIT_UPLOAD_BURST=""
-      FALLBACK_LIMIT_DOWNLOAD_BPS=""
-      FALLBACK_LIMIT_DOWNLOAD_BURST=""
-      ;;
-    2)
-      FALLBACK_MODE="protected"
-      while :; do
-        printf '本机 Tunnel 监听端口 [%s]: ' "${DEFAULT_FALLBACK_PORT}"
-        read -r input
-        FALLBACK_PORT="${input:-${DEFAULT_FALLBACK_PORT}}"
-        case "${FALLBACK_PORT}" in
-          ''|*[!0-9]*) echo "端口无效。"; continue ;;
-        esac
-        [ "${FALLBACK_PORT}" -ge 1 ] && [ "${FALLBACK_PORT}" -le 65535 ] || {
-          echo "端口无效。"
-          continue
-        }
-        [ "${FALLBACK_PORT}" != "${PORT}" ] || {
-          echo "Tunnel 端口不能与 Reality 监听端口相同。"
-          continue
-        }
-        if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${FALLBACK_PORT}$"; then
-          echo "端口 ${FALLBACK_PORT} 已被占用，请换一个端口。"
-          continue
-        fi
-        break
-      done
-      REALITY_DEST="127.0.0.1:${FALLBACK_PORT}"
-      prompt_fallback_limit
-      ;;
-    *) fail "无效的回落模式。" ;;
-  esac
+    case "${input:-1}" in
+      1)
+        FALLBACK_MODE="direct"
+        REALITY_DEST="${SNI}:443"
+        FALLBACK_PORT=""
+        FALLBACK_LIMIT_MODE="disabled"
+        FALLBACK_LIMIT_AFTER_BYTES=""
+        FALLBACK_LIMIT_UPLOAD_BPS=""
+        FALLBACK_LIMIT_UPLOAD_BURST=""
+        FALLBACK_LIMIT_DOWNLOAD_BPS=""
+        FALLBACK_LIMIT_DOWNLOAD_BURST=""
+        return
+        ;;
+      2)
+        FALLBACK_MODE="protected"
+        while :; do
+          printf '本机 Tunnel 监听端口 [%s]: ' "${DEFAULT_FALLBACK_PORT}"
+          read -r input
+          FALLBACK_PORT="${input:-${DEFAULT_FALLBACK_PORT}}"
+          case "${FALLBACK_PORT}" in
+            ''|*[!0-9]*) echo "端口无效，请重新输入。"; continue ;;
+          esac
+          [ "${FALLBACK_PORT}" -ge 1 ] && [ "${FALLBACK_PORT}" -le 65535 ] || {
+            echo "端口无效，请重新输入。"
+            continue
+          }
+          [ "${FALLBACK_PORT}" != "${PORT}" ] || {
+            echo "Tunnel 端口不能与 Reality 监听端口相同，请重新输入。"
+            continue
+          }
+          if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${FALLBACK_PORT}$"; then
+            echo "端口 ${FALLBACK_PORT} 已被占用，请换一个端口。"
+            continue
+          fi
+          break
+        done
+        REALITY_DEST="127.0.0.1:${FALLBACK_PORT}"
+        prompt_fallback_limit
+        return
+        ;;
+      *) echo "无效的回落模式，请输入 1 或 2。" ;;
+    esac
+  done
 }
 
 prompt_fallback_limit() {
   local input
+  while :; do
+    echo
+    echo "回落限速（仅高级保护模式）："
+    echo "  1. 关闭"
+    echo "  2. 推荐：前 1 MiB 不限速，上传 64 KiB/s，下载 128 KiB/s"
+    echo "  3. 自定义：单位为字节"
+    printf '选择限速模式 [1]: '
+    read -r input
 
-  echo
-  echo "回落限速（仅高级保护模式）："
-  echo "  1. 关闭"
-  echo "  2. 推荐：前 1 MiB 不限速，上传 64 KiB/s，下载 128 KiB/s"
-  echo "  3. 自定义：单位为字节"
-  printf '选择限速模式 [1]: '
-  read -r input
-
-  case "${input:-1}" in
-    1)
-      FALLBACK_LIMIT_MODE="disabled"
-      FALLBACK_LIMIT_AFTER_BYTES=""
-      FALLBACK_LIMIT_UPLOAD_BPS=""
-      FALLBACK_LIMIT_UPLOAD_BURST=""
-      FALLBACK_LIMIT_DOWNLOAD_BPS=""
-      FALLBACK_LIMIT_DOWNLOAD_BURST=""
-      ;;
-    2)
-      FALLBACK_LIMIT_MODE="recommended"
-      FALLBACK_LIMIT_AFTER_BYTES="${DEFAULT_LIMIT_AFTER_BYTES}"
-      FALLBACK_LIMIT_UPLOAD_BPS="${DEFAULT_LIMIT_UPLOAD_BPS}"
-      FALLBACK_LIMIT_UPLOAD_BURST="${DEFAULT_LIMIT_UPLOAD_BURST}"
-      FALLBACK_LIMIT_DOWNLOAD_BPS="${DEFAULT_LIMIT_DOWNLOAD_BPS}"
-      FALLBACK_LIMIT_DOWNLOAD_BURST="${DEFAULT_LIMIT_DOWNLOAD_BURST}"
-      ;;
-    3)
-      FALLBACK_LIMIT_MODE="custom"
-      prompt_limit_value "限速开始前的字节数" "${DEFAULT_LIMIT_AFTER_BYTES}" FALLBACK_LIMIT_AFTER_BYTES
-      prompt_limit_value "上传 bytesPerSec" "${DEFAULT_LIMIT_UPLOAD_BPS}" FALLBACK_LIMIT_UPLOAD_BPS
-      prompt_limit_value "上传 burstBytesPerSec" "${DEFAULT_LIMIT_UPLOAD_BURST}" FALLBACK_LIMIT_UPLOAD_BURST
-      prompt_limit_value "下载 bytesPerSec" "${DEFAULT_LIMIT_DOWNLOAD_BPS}" FALLBACK_LIMIT_DOWNLOAD_BPS
-      prompt_limit_value "下载 burstBytesPerSec" "${DEFAULT_LIMIT_DOWNLOAD_BURST}" FALLBACK_LIMIT_DOWNLOAD_BURST
-      [ "${FALLBACK_LIMIT_UPLOAD_BPS}" -gt 0 ] || fail "上传 bytesPerSec 必须大于 0。"
-      [ "${FALLBACK_LIMIT_DOWNLOAD_BPS}" -gt 0 ] || fail "下载 bytesPerSec 必须大于 0。"
-      [ "${FALLBACK_LIMIT_UPLOAD_BURST}" -ge "${FALLBACK_LIMIT_UPLOAD_BPS}" ] || fail "上传 burstBytesPerSec 不能小于 bytesPerSec。"
-      [ "${FALLBACK_LIMIT_DOWNLOAD_BURST}" -ge "${FALLBACK_LIMIT_DOWNLOAD_BPS}" ] || fail "下载 burstBytesPerSec 不能小于 bytesPerSec。"
-      ;;
-    *) fail "无效的限速模式。" ;;
-  esac
+    case "${input:-1}" in
+      1)
+        FALLBACK_LIMIT_MODE="disabled"
+        FALLBACK_LIMIT_AFTER_BYTES=""
+        FALLBACK_LIMIT_UPLOAD_BPS=""
+        FALLBACK_LIMIT_UPLOAD_BURST=""
+        FALLBACK_LIMIT_DOWNLOAD_BPS=""
+        FALLBACK_LIMIT_DOWNLOAD_BURST=""
+        return
+        ;;
+      2)
+        FALLBACK_LIMIT_MODE="recommended"
+        FALLBACK_LIMIT_AFTER_BYTES="${DEFAULT_LIMIT_AFTER_BYTES}"
+        FALLBACK_LIMIT_UPLOAD_BPS="${DEFAULT_LIMIT_UPLOAD_BPS}"
+        FALLBACK_LIMIT_UPLOAD_BURST="${DEFAULT_LIMIT_UPLOAD_BURST}"
+        FALLBACK_LIMIT_DOWNLOAD_BPS="${DEFAULT_LIMIT_DOWNLOAD_BPS}"
+        FALLBACK_LIMIT_DOWNLOAD_BURST="${DEFAULT_LIMIT_DOWNLOAD_BURST}"
+        return
+        ;;
+      3)
+        FALLBACK_LIMIT_MODE="custom"
+        prompt_limit_value "限速开始前的字节数" "${DEFAULT_LIMIT_AFTER_BYTES}" FALLBACK_LIMIT_AFTER_BYTES
+        prompt_limit_value "上传 bytesPerSec" "${DEFAULT_LIMIT_UPLOAD_BPS}" FALLBACK_LIMIT_UPLOAD_BPS
+        prompt_limit_value "上传 burstBytesPerSec" "${DEFAULT_LIMIT_UPLOAD_BURST}" FALLBACK_LIMIT_UPLOAD_BURST
+        prompt_limit_value "下载 bytesPerSec" "${DEFAULT_LIMIT_DOWNLOAD_BPS}" FALLBACK_LIMIT_DOWNLOAD_BPS
+        prompt_limit_value "下载 burstBytesPerSec" "${DEFAULT_LIMIT_DOWNLOAD_BURST}" FALLBACK_LIMIT_DOWNLOAD_BURST
+        if [ "${FALLBACK_LIMIT_UPLOAD_BPS}" -le 0 ]; then
+          echo "上传 bytesPerSec 必须大于 0，请重新配置。"
+          continue
+        fi
+        if [ "${FALLBACK_LIMIT_DOWNLOAD_BPS}" -le 0 ]; then
+          echo "下载 bytesPerSec 必须大于 0，请重新配置。"
+          continue
+        fi
+        if [ "${FALLBACK_LIMIT_UPLOAD_BURST}" -lt "${FALLBACK_LIMIT_UPLOAD_BPS}" ]; then
+          echo "上传 burstBytesPerSec 不能小于 bytesPerSec，请重新配置。"
+          continue
+        fi
+        if [ "${FALLBACK_LIMIT_DOWNLOAD_BURST}" -lt "${FALLBACK_LIMIT_DOWNLOAD_BPS}" ]; then
+          echo "下载 burstBytesPerSec 不能小于 bytesPerSec，请重新配置。"
+          continue
+        fi
+        return
+        ;;
+      *) echo "无效的限速模式，请输入 1 到 3。" ;;
+    esac
+  done
 }
 
 prompt_limit_value() {
@@ -1391,41 +1456,56 @@ prompt_limit_value() {
 
 prompt_fallback_limit() {
   local input default after upload upload_burst download download_burst
-  case "${FALLBACK_LIMIT_MODE}" in
-    disabled) default=1 ;;
-    recommended) default=2 ;;
-    *) default=3 ;;
-  esac
+  while :; do
+    case "${FALLBACK_LIMIT_MODE}" in
+      disabled) default=1 ;;
+      recommended) default=2 ;;
+      *) default=3 ;;
+    esac
 
-  echo
-  echo "回落限速："
-  echo "  1. 关闭"
-  echo "  2. 推荐：前 1 MiB 不限速，上传 64 KiB/s，下载 128 KiB/s"
-  echo "  3. 自定义：单位为字节"
-  printf '选择限速模式 [%s]: ' "${default}"
-  read -r input
-  case "${input:-${default}}" in
-    1) clear_fallback_limit ;;
-    2) set_recommended_fallback_limit ;;
-    3)
-      FALLBACK_LIMIT_MODE="custom"
-      after="${FALLBACK_LIMIT_AFTER_BYTES:-${DEFAULT_LIMIT_AFTER_BYTES}}"
-      upload="${FALLBACK_LIMIT_UPLOAD_BPS:-${DEFAULT_LIMIT_UPLOAD_BPS}}"
-      upload_burst="${FALLBACK_LIMIT_UPLOAD_BURST:-${DEFAULT_LIMIT_UPLOAD_BURST}}"
-      download="${FALLBACK_LIMIT_DOWNLOAD_BPS:-${DEFAULT_LIMIT_DOWNLOAD_BPS}}"
-      download_burst="${FALLBACK_LIMIT_DOWNLOAD_BURST:-${DEFAULT_LIMIT_DOWNLOAD_BURST}}"
-      prompt_limit_value "限速开始前的字节数" "${after}" FALLBACK_LIMIT_AFTER_BYTES
-      prompt_limit_value "上传 bytesPerSec" "${upload}" FALLBACK_LIMIT_UPLOAD_BPS
-      prompt_limit_value "上传 burstBytesPerSec" "${upload_burst}" FALLBACK_LIMIT_UPLOAD_BURST
-      prompt_limit_value "下载 bytesPerSec" "${download}" FALLBACK_LIMIT_DOWNLOAD_BPS
-      prompt_limit_value "下载 burstBytesPerSec" "${download_burst}" FALLBACK_LIMIT_DOWNLOAD_BURST
-      [ "${FALLBACK_LIMIT_UPLOAD_BPS}" -gt 0 ] || fail "上传 bytesPerSec 必须大于 0。"
-      [ "${FALLBACK_LIMIT_DOWNLOAD_BPS}" -gt 0 ] || fail "下载 bytesPerSec 必须大于 0。"
-      [ "${FALLBACK_LIMIT_UPLOAD_BURST}" -ge "${FALLBACK_LIMIT_UPLOAD_BPS}" ] || fail "上传 burstBytesPerSec 不能小于 bytesPerSec。"
-      [ "${FALLBACK_LIMIT_DOWNLOAD_BURST}" -ge "${FALLBACK_LIMIT_DOWNLOAD_BPS}" ] || fail "下载 burstBytesPerSec 不能小于 bytesPerSec。"
-      ;;
-    *) fail "无效的限速模式。" ;;
-  esac
+    echo
+    echo "回落限速："
+    echo "  1. 关闭"
+    echo "  2. 推荐：前 1 MiB 不限速，上传 64 KiB/s，下载 128 KiB/s"
+    echo "  3. 自定义：单位为字节"
+    printf '选择限速模式 [%s]: ' "${default}"
+    read -r input
+    case "${input:-${default}}" in
+      1) clear_fallback_limit; return ;;
+      2) set_recommended_fallback_limit; return ;;
+      3)
+        FALLBACK_LIMIT_MODE="custom"
+        after="${FALLBACK_LIMIT_AFTER_BYTES:-${DEFAULT_LIMIT_AFTER_BYTES}}"
+        upload="${FALLBACK_LIMIT_UPLOAD_BPS:-${DEFAULT_LIMIT_UPLOAD_BPS}}"
+        upload_burst="${FALLBACK_LIMIT_UPLOAD_BURST:-${DEFAULT_LIMIT_UPLOAD_BURST}}"
+        download="${FALLBACK_LIMIT_DOWNLOAD_BPS:-${DEFAULT_LIMIT_DOWNLOAD_BPS}}"
+        download_burst="${FALLBACK_LIMIT_DOWNLOAD_BURST:-${DEFAULT_LIMIT_DOWNLOAD_BURST}}"
+        prompt_limit_value "限速开始前的字节数" "${after}" FALLBACK_LIMIT_AFTER_BYTES
+        prompt_limit_value "上传 bytesPerSec" "${upload}" FALLBACK_LIMIT_UPLOAD_BPS
+        prompt_limit_value "上传 burstBytesPerSec" "${upload_burst}" FALLBACK_LIMIT_UPLOAD_BURST
+        prompt_limit_value "下载 bytesPerSec" "${download}" FALLBACK_LIMIT_DOWNLOAD_BPS
+        prompt_limit_value "下载 burstBytesPerSec" "${download_burst}" FALLBACK_LIMIT_DOWNLOAD_BURST
+        if [ "${FALLBACK_LIMIT_UPLOAD_BPS}" -le 0 ]; then
+          echo "上传 bytesPerSec 必须大于 0，请重新配置。"
+          continue
+        fi
+        if [ "${FALLBACK_LIMIT_DOWNLOAD_BPS}" -le 0 ]; then
+          echo "下载 bytesPerSec 必须大于 0，请重新配置。"
+          continue
+        fi
+        if [ "${FALLBACK_LIMIT_UPLOAD_BURST}" -lt "${FALLBACK_LIMIT_UPLOAD_BPS}" ]; then
+          echo "上传 burstBytesPerSec 不能小于 bytesPerSec，请重新配置。"
+          continue
+        fi
+        if [ "${FALLBACK_LIMIT_DOWNLOAD_BURST}" -lt "${FALLBACK_LIMIT_DOWNLOAD_BPS}" ]; then
+          echo "下载 burstBytesPerSec 不能小于 bytesPerSec，请重新配置。"
+          continue
+        fi
+        return
+        ;;
+      *) echo "无效的限速模式，请输入 1 到 3。" ;;
+    esac
+  done
 }
 
 configure_fallback() {
@@ -1439,15 +1519,17 @@ configure_fallback() {
   echo "Reality 回落设置："
   echo "  1. 普通：无效连接直接回落到 ${SNI}:443。"
   echo "  2. 高级：经本机 Tunnel 回落，仅允许 ${SNI}，其他 SNI 丢弃。"
-  printf '选择回落模式 [%s]: ' "${default}"
-  read -r input
+  while :; do
+    printf '选择回落模式 [%s]: ' "${default}"
+    read -r input
 
-  case "${input:-${default}}" in
+    case "${input:-${default}}" in
     1)
       FALLBACK_MODE="direct"
       FALLBACK_PORT=""
       REALITY_DEST="${SNI}:443"
       clear_fallback_limit
+      return
       ;;
     2)
       FALLBACK_MODE="protected"
@@ -1460,16 +1542,22 @@ configure_fallback() {
           *)
             [ "${input}" -ge 1 ] && [ "${input}" -le 65535 ] || { echo "端口无效。"; continue; }
             [ "${input}" != "${PORT}" ] || { echo "Tunnel 端口不能与 Reality 监听端口相同。"; continue; }
+            if [ "${input}" != "${FALLBACK_PORT:-}" ] && command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${input}$"; then
+              echo "端口 ${input} 已被占用，请换一个端口。"
+              continue
+            fi
             FALLBACK_PORT="${input}"
             break
-            ;;
+          ;;
         esac
       done
       REALITY_DEST="127.0.0.1:${FALLBACK_PORT}"
       prompt_fallback_limit
+      return
       ;;
-    *) fail "无效的回落模式。" ;;
-  esac
+    *) echo "无效的回落模式，请输入 1 或 2。" ;;
+    esac
+  done
 }
 
 outbound_mode_label() {
@@ -1503,18 +1591,21 @@ choose_outbound_mode() {
     happy6v4) default=6 ;;
     *) default=1 ;;
   esac
-  printf '选择出站模式 [%s]: ' "${default}"
-  read -r input
-  case "${input:-${default}}" in
-    0) MENU_CANCELLED=1; return ;;
-    1) SELECTED_OUTBOUND_MODE="ipv4" ;;
-    2) SELECTED_OUTBOUND_MODE="ipv6" ;;
-    3) SELECTED_OUTBOUND_MODE="ipv4v6" ;;
-    4) SELECTED_OUTBOUND_MODE="ipv6v4" ;;
-    5) SELECTED_OUTBOUND_MODE="happy4v6" ;;
-    6) SELECTED_OUTBOUND_MODE="happy6v4" ;;
-    *) fail "无效的出站模式。" ;;
-  esac
+  while :; do
+    printf '选择出站模式 [%s]: ' "${default}"
+    read -r input
+    case "${input:-${default}}" in
+      0) MENU_CANCELLED=1; return ;;
+      1) SELECTED_OUTBOUND_MODE="ipv4" ;;
+      2) SELECTED_OUTBOUND_MODE="ipv6" ;;
+      3) SELECTED_OUTBOUND_MODE="ipv4v6" ;;
+      4) SELECTED_OUTBOUND_MODE="ipv6v4" ;;
+      5) SELECTED_OUTBOUND_MODE="happy4v6" ;;
+      6) SELECTED_OUTBOUND_MODE="happy6v4" ;;
+      *) echo "无效的出站模式，请输入 0 到 6。"; continue ;;
+    esac
+    break
+  done
   warn_unavailable_outbound_mode "${SELECTED_OUTBOUND_MODE}"
 }
 
@@ -1578,14 +1669,16 @@ add_domain_rule() {
   echo "  1. 精确匹配，例如 api.example.com"
   echo "  2. 后缀匹配，例如 example.com 会匹配其子域名"
   echo "  0. 返回上一级"
-  printf '选择匹配类型 [1]: '
-  read -r input
-  case "${input:-1}" in
-    0) MENU_CANCELLED=1; return ;;
-    1) route_type="full" ;;
-    2) route_type="domain" ;;
-    *) fail "无效的域名匹配类型。" ;;
-  esac
+  while :; do
+    printf '选择匹配类型 [1]: '
+    read -r input
+    case "${input:-1}" in
+      0) MENU_CANCELLED=1; return ;;
+      1) route_type="full"; break ;;
+      2) route_type="domain"; break ;;
+      *) echo "无效的域名匹配类型，请输入 0、1 或 2。" ;;
+    esac
+  done
   while :; do
     printf '输入域名（输入 0 返回）: '
     read -r domain
@@ -2195,24 +2288,39 @@ traffic_menu_summary() {
 }
 
 configure_traffic_schedule() {
-  local input day hour minute
+  local input day hour minute hour_value minute_value
   MENU_RETURNED=0
   load_traffic_settings
-  printf '每月重置日期（1-28）[%s]（输入 0 返回）: ' "${RESET_DAY}"
-  read -r input
-  [ "${input}" = "0" ] && { MENU_RETURNED=1; return; }
-  day="${input:-${RESET_DAY}}"
-  case "${day}" in ''|*[!0-9]*) echo "日期无效。"; return ;; esac
-  [ "${day}" -ge 1 ] && [ "${day}" -le 28 ] || { echo "日期必须为 1 到 28。"; return; }
-  printf '重置时间（HH:MM）[%02d:%02d]: ' "${RESET_HOUR}" "${RESET_MINUTE}"
-  read -r input
-  input="${input:-$(printf '%02d:%02d' "${RESET_HOUR}" "${RESET_MINUTE}")}"
-  case "${input}" in
-    [0-9][0-9]:[0-9][0-9]) hour="${input%%:*}"; minute="${input##*:}" ;;
-    *) echo "时间格式无效，请使用 HH:MM。"; return ;;
-  esac
-  [ "${hour#0}" -le 23 ] 2>/dev/null || { echo "小时必须为 00 到 23。"; return; }
-  [ "${minute#0}" -le 59 ] 2>/dev/null || { echo "分钟必须为 00 到 59。"; return; }
+  while :; do
+    printf '每月重置日期（1-28）[%s]（输入 0 返回）: ' "${RESET_DAY}"
+    read -r input
+    [ "${input}" = "0" ] && { MENU_RETURNED=1; return; }
+    day="${input:-${RESET_DAY}}"
+    case "${day}" in
+      ''|*[!0-9]*) echo "日期无效，请重新输入。"; continue ;;
+    esac
+    if [ "${day}" -lt 1 ] || [ "${day}" -gt 28 ]; then
+      echo "日期必须为 1 到 28，请重新输入。"
+      continue
+    fi
+
+    printf '重置时间（HH:MM）[%02d:%02d]: ' "${RESET_HOUR}" "${RESET_MINUTE}"
+    read -r input
+    input="${input:-$(printf '%02d:%02d' "${RESET_HOUR}" "${RESET_MINUTE}")}"
+    case "${input}" in
+      [0-9][0-9]:[0-9][0-9]) hour="${input%%:*}"; minute="${input##*:}" ;;
+      *) echo "时间格式无效，请使用 HH:MM。"; continue ;;
+    esac
+    hour_value="${hour#0}"
+    minute_value="${minute#0}"
+    [ -n "${hour_value}" ] || hour_value=0
+    [ -n "${minute_value}" ] || minute_value=0
+    if [ "${hour_value}" -gt 23 ] || [ "${minute_value}" -gt 59 ]; then
+      echo "时间无效，小时必须为 00 到 23，分钟必须为 00 到 59。"
+      continue
+    fi
+    break
+  done
   cat > "${TRAFFIC_SETTINGS_FILE}" <<SETTINGS
 RESET_DAY='${day}'
 RESET_HOUR='${hour#0}'
@@ -2752,12 +2860,18 @@ apply_config() {
 }
 
 modify_port() {
+  local old_port
   load_state
-  old_port="${PORT}"
-  prompt_port
-  if [ "${PORT}" != "${old_port}" ] && command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${PORT}$"; then
-    fail "端口 ${PORT} 已被占用，请换一个端口。"
-  fi
+  while :; do
+    old_port="${PORT}"
+    prompt_port
+    if [ "${PORT}" != "${old_port}" ] && command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${PORT}$"; then
+      echo "端口 ${PORT} 已被占用，请换一个端口。"
+      PORT="${old_port}"
+      continue
+    fi
+    break
+  done
   apply_config
 }
 modify_sni() { load_state; prompt_sni; apply_config; }
@@ -2777,14 +2891,16 @@ modify_inbound_mode() {
   echo "  1. IPv4：${ipv4_display}（监听 0.0.0.0）"
   echo "  2. IPv6：${ipv6_display}（监听 ::）"
   echo "  0. 返回主菜单"
-  printf '选择节点入站 [%s]: ' "${default_option}"
-  read -r input
-  case "${input:-${default_option}}" in
-    1) next_mode="ipv4" ;;
-    2) next_mode="ipv6" ;;
-    0) return ;;
-    *) echo "无效的节点入站选择。"; return ;;
-  esac
+  while :; do
+    printf '选择节点入站 [%s]: ' "${default_option}"
+    read -r input
+    case "${input:-${default_option}}" in
+      1) next_mode="ipv4"; break ;;
+      2) next_mode="ipv6"; break ;;
+      0) return ;;
+      *) echo "无效的节点入站选择，请输入 0、1 或 2。" ;;
+    esac
+  done
 
   case "${next_mode}" in
     ipv4)
@@ -2820,15 +2936,20 @@ modify_inbound_mode() {
 }
 
 modify_fallback() {
+  local old_fallback_mode old_fallback_port
   load_state
-  old_fallback_mode="${FALLBACK_MODE}"
-  old_fallback_port="${FALLBACK_PORT}"
-  configure_fallback
-  if [ "${FALLBACK_MODE}" = "protected" ] && { [ "${FALLBACK_MODE}" != "${old_fallback_mode}" ] || [ "${FALLBACK_PORT}" != "${old_fallback_port}" ]; }; then
-    if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${FALLBACK_PORT}$"; then
-      fail "Tunnel 端口 ${FALLBACK_PORT} 已被占用，请换一个端口。"
+  while :; do
+    old_fallback_mode="${FALLBACK_MODE}"
+    old_fallback_port="${FALLBACK_PORT}"
+    configure_fallback
+    if [ "${FALLBACK_MODE}" = "protected" ] && { [ "${FALLBACK_MODE}" != "${old_fallback_mode}" ] || [ "${FALLBACK_PORT}" != "${old_fallback_port}" ]; }; then
+      if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${FALLBACK_PORT}$"; then
+        echo "Tunnel 端口 ${FALLBACK_PORT} 已被占用，请换一个端口。"
+        continue
+      fi
     fi
-  fi
+    break
+  done
   apply_config
 }
 
