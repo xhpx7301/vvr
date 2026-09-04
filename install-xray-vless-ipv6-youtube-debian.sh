@@ -902,7 +902,8 @@ class Handler(BaseHTTPRequestHandler):
         # query-token form for the existing VVR CLI and older integrations.
         authorization = self.headers.get("Authorization", "")
         bearer = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
-        supplied = bearer or query.get("token", [""])[0]
+        api_key = self.headers.get("X-API-Key", "").strip()
+        supplied = bearer or api_key or query.get("token", [""])[0]
         if supplied != token:
             self.send_error(403, "invalid token")
             return False
@@ -3164,6 +3165,11 @@ print_result() {
 main() {
   need_root
   check_debian
+  if [ "${1:-}" = "--update-traffic-api" ]; then
+    write_traffic_components
+    ok "流量 API 已更新；现有 Xray 配置、节点密钥和 API Token 保持不变。"
+    return 0
+  fi
   install_dependencies
   detect_arch
   prepare_tmp
@@ -3180,4 +3186,13 @@ main() {
   print_result
 }
 
-main "$@"
+case "${1:-}" in
+  ''|--update-traffic-api)
+    main "$@"
+    ;;
+  *)
+    echo "用法：$0 [--update-traffic-api]" >&2
+    echo "  --update-traffic-api 仅更新 MiSub/3X-UI 流量 API，不改动 Xray 节点配置。" >&2
+    exit 2
+    ;;
+esac
