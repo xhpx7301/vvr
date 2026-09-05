@@ -792,7 +792,7 @@ TOKEN_FILE = os.environ.get("VVR_TRAFFIC_TOKEN_FILE", "/etc/xray/vvr-traffic.tok
 SETTINGS_FILE = os.environ.get("VVR_TRAFFIC_SETTINGS_FILE", "/etc/xray/vvr-traffic-settings.env")
 
 def reset_settings():
-    settings = {"day": 1, "hour": 0, "minute": 0, "collection_enabled": True}
+    settings = {"day": 1, "hour": 0, "minute": 0, "collection_enabled": True, "auto_reset_enabled": True}
     try:
         with open(SETTINGS_FILE, encoding="utf-8") as handle:
             for line in handle:
@@ -807,6 +807,8 @@ def reset_settings():
                         settings["minute"] = int(value)
                     elif key == "COLLECTION_ENABLED":
                         settings["collection_enabled"] = value.lower() not in ("0", "false", "no", "off")
+                    elif key == "AUTO_RESET_ENABLED":
+                        settings["auto_reset_enabled"] = value.lower() not in ("0", "false", "no", "off")
     except (OSError, ValueError):
         pass
     settings["day"] = min(max(settings["day"], 1), 28)
@@ -844,6 +846,9 @@ def collect(force=False):
     settings = reset_settings()
     db = db_connect()
     row = db.execute("SELECT month,total_up,total_down,last_up,last_down,updated_at FROM traffic WHERE id=1").fetchone()
+    if not settings["auto_reset_enabled"]:
+        # Keep the stored period across calendar changes until an explicit reset.
+        period = row[0] if row is not None else now[:16].replace("T", " ")
     if not settings["collection_enabled"] and not force:
         if row is None or row[0] != period:
             result = {"month": period[:7], "period_start": period, "up": 0, "down": 0, "total": 0, "updated_at": "暂无", "collection_enabled": False}
@@ -879,11 +884,12 @@ def reset():
         raise RuntimeError("xray stats unavailable")
     now = datetime.now().isoformat(timespec="seconds")
     db = db_connect()
-    period = period_key()
+    settings = reset_settings()
+    period = period_key() if settings["auto_reset_enabled"] else now[:16].replace("T", " ")
     db.execute("INSERT INTO traffic(id,month,total_up,total_down,last_up,last_down,updated_at) VALUES(1,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET month=excluded.month,total_up=0,total_down=0,last_up=excluded.last_up,last_down=excluded.last_down,updated_at=excluded.updated_at", (period,0,0,up,down,now))
     db.commit()
     db.close()
-    return {"month": period[:7], "period_start": period, "up": 0, "down": 0, "total": 0, "updated_at": now, "collection_enabled": reset_settings()["collection_enabled"]}
+    return {"month": period[:7], "period_start": period, "up": 0, "down": 0, "total": 0, "updated_at": now, "collection_enabled": settings["collection_enabled"]}
 
 def read_token():
     try:
@@ -931,7 +937,7 @@ class Handler(BaseHTTPRequestHandler):
     def _xui_inbounds_payload(self):
         traffic = self._traffic_payload()
         # MiSub consumes the standard 3X-UI inbound list shape. VVR has one
-        # logical inbound, so expose its monthly aggregate as inbound id 1.
+        # logical inbound, so expose its current period aggregate as inbound id 1.
         return {
             "success": True,
             "obj": [{
@@ -1018,6 +1024,7 @@ RESET_DAY='1'
 RESET_HOUR='0'
 RESET_MINUTE='0'
 COLLECTION_ENABLED='1'
+AUTO_RESET_ENABLED='1'
 SETTINGS
   fi
   chmod 0600 "${TRAFFIC_SETTINGS_FILE}"
@@ -2181,15 +2188,30 @@ load_traffic_settings() {
   RESET_HOUR="0"
   RESET_MINUTE="0"
   COLLECTION_ENABLED="1"
+  AUTO_RESET_ENABLED="1"
   if [ -f "${TRAFFIC_SETTINGS_FILE}" ]; then
     # shellcheck disable=SC1090
     . "${TRAFFIC_SETTINGS_FILE}"
   fi
 }
 
+save_traffic_settings() {
+  cat > "${TRAFFIC_SETTINGS_FILE}" <<SETTINGS
+RESET_DAY='${RESET_DAY}'
+RESET_HOUR='${RESET_HOUR}'
+RESET_MINUTE='${RESET_MINUTE}'
+COLLECTION_ENABLED='${COLLECTION_ENABLED}'
+AUTO_RESET_ENABLED='${AUTO_RESET_ENABLED}'
+SETTINGS
+  chmod 0600 "${TRAFFIC_SETTINGS_FILE}"
+}
+
 traffic_schedule_label() {
   load_traffic_settings
-  printf '每月 %s 日 %02d:%02d' "${RESET_DAY}" "${RESET_HOUR}" "${RESET_MINUTE}"
+  case "${AUTO_RESET_ENABLED}" in
+    0|false|no|off) printf '已关闭（仅由 MiSub/手动重置流量）' ;;
+    *) printf '已开启（每月 %s 日 %02d:%02d 自动开始新周期）' "${RESET_DAY}" "${RESET_HOUR}" "${RESET_MINUTE}" ;;
+  esac
 }
 
 traffic_auto_collection_label() {
@@ -2303,9 +2325,33 @@ traffic_menu_summary() {
 }
 
 configure_traffic_schedule() {
-  local input day hour minute hour_value minute_value
+  local input day hour minute hour_value minute_value default
   MENU_RETURNED=0
   load_traffic_settings
+  echo "每月自动重置：$(traffic_schedule_label)"
+  case "${AUTO_RESET_ENABLED}" in
+    0|false|no|off) default=2 ;;
+    *) default=1 ;;
+  esac
+  while :; do
+    echo "  1. 开启每月自动重置并设置时间"
+    echo "  2. 关闭每月自动重置（仅由 MiSub/手动重置）"
+    echo "  0. 返回上一级"
+    printf '请选择操作 [%s]: ' "${default}"
+    read -r input
+    case "${input:-${default}}" in
+      1) break ;;
+      2)
+        AUTO_RESET_ENABLED=0
+        save_traffic_settings
+        ok "每月自动重置已关闭，当前统计周期和累计流量将持续保留。"
+        echo "流量采集和 MiSub API 按原设置运行，仅由 MiSub/手动重置流量。"
+        return
+        ;;
+      0) MENU_RETURNED=1; return ;;
+      *) echo "无效选择，请输入 0-2。" ;;
+    esac
+  done
   while :; do
     printf '每月重置日期（1-28）[%s]（输入 0 返回）: ' "${RESET_DAY}"
     read -r input
@@ -2336,14 +2382,12 @@ configure_traffic_schedule() {
     fi
     break
   done
-  cat > "${TRAFFIC_SETTINGS_FILE}" <<SETTINGS
-RESET_DAY='${day}'
-RESET_HOUR='${hour#0}'
-RESET_MINUTE='${minute#0}'
-COLLECTION_ENABLED='${COLLECTION_ENABLED}'
-SETTINGS
-  chmod 0600 "${TRAFFIC_SETTINGS_FILE}"
-  ok "流量重置时间已设置为每月 ${day} 日 ${hour}:${minute}。"
+  RESET_DAY="${day}"
+  RESET_HOUR="${hour_value}"
+  RESET_MINUTE="${minute_value}"
+  AUTO_RESET_ENABLED=1
+  save_traffic_settings
+  ok "每月自动重置已开启，重置时间为每月 ${day} 日 ${hour}:${minute}。"
   echo "下一次采集或 API 请求时按新周期计算，无需重启 Xray。"
 }
 
@@ -2383,13 +2427,8 @@ configure_traffic_collection() {
     n|N|no|NO) echo "已取消修改。"; return ;;
     *) echo "输入无效，已取消修改。"; return ;;
   esac
-  cat > "${TRAFFIC_SETTINGS_FILE}" <<SETTINGS
-RESET_DAY='${RESET_DAY}'
-RESET_HOUR='${RESET_HOUR}'
-RESET_MINUTE='${RESET_MINUTE}'
-COLLECTION_ENABLED='${enabled}'
-SETTINGS
-  chmod 0600 "${TRAFFIC_SETTINGS_FILE}"
+  COLLECTION_ENABLED="${enabled}"
+  save_traffic_settings
   if [ "${enabled}" -eq 1 ]; then
     if ! systemctl enable --now vvr-traffic-collector.timer; then
       warn "流量采集定时器启动失败，请检查：systemctl status vvr-traffic-collector.timer --no-pager"
@@ -2654,13 +2693,14 @@ manage_traffic() {
     echo " API 监听：$(traffic_api_binding_label)"
     echo " VVR 内部统计接口：$(traffic_api_endpoint)"
     echo " MiSub 面板地址（请填写此地址）：$(traffic_xui_base_endpoint)"
-    echo " 自动采集：$(traffic_auto_collection_label)；$(traffic_schedule_label)自动开始新周期"
+    echo " 自动采集：$(traffic_auto_collection_label)"
+    echo " 每月自动重置：$(traffic_schedule_label)"
     traffic_collection_status
     echo " 1. 查看当前流量"
     echo " 2. 立即采集一次"
     echo " 3. 重置当前周期流量"
     echo " 4. 查看 MiSub API 信息"
-    echo " 5. 设置每月重置时间"
+    echo " 5. 开启/关闭每月自动重置及设置时间"
     echo " 6. 修改服务器时区（当前：$(server_timezone)）"
     echo " 7. 开启/关闭流量采集"
     echo " 8. 设置 API 访问方式"
