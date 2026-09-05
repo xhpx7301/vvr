@@ -3218,7 +3218,8 @@ main() {
   check_debian
   if [ "${1:-}" = "--update-traffic-api" ]; then
     write_traffic_components
-    ok "流量 API 已更新；现有 Xray 配置、节点密钥和 API Token 保持不变。"
+    write_manager_command
+    ok "流量 API 和 vvr 管理命令已更新；现有 Xray 配置、节点密钥和 API Token 保持不变。"
     return 0
   fi
   install_dependencies
