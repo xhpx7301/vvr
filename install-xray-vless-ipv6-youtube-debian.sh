@@ -2514,6 +2514,47 @@ SETTINGS
   fi
 }
 
+rotate_traffic_token() {
+  local answer new_token tmp_token
+  echo
+  warn "重置后旧 API Token 会立即失效，MiSub 必须改用新 Token。"
+  printf '确认重置流量 API Token？[y/N]: '
+  read -r answer
+  case "${answer}" in
+    y|Y|yes|YES) ;;
+    *) echo "已取消重置 API Token。"; return ;;
+  esac
+
+  mkdir -p "${CONFIG_DIR}"
+  if ! new_token="$(openssl rand -hex 24)" || [ -z "${new_token}" ]; then
+    warn "生成新 API Token 失败，旧 Token 未修改。"
+    return
+  fi
+  if ! tmp_token="$(mktemp "${CONFIG_DIR}/vvr-traffic.token.XXXXXX")"; then
+    warn "无法创建临时 Token 文件，旧 Token 未修改。"
+    return
+  fi
+  chmod 0600 "${tmp_token}"
+  if ! printf '%s\n' "${new_token}" > "${tmp_token}" || ! mv -f "${tmp_token}" "${CONFIG_DIR}/vvr-traffic.token"; then
+    rm -f "${tmp_token}"
+    warn "写入新 API Token 失败，旧 Token 可能仍在使用。"
+    return
+  fi
+  chmod 0600 "${CONFIG_DIR}/vvr-traffic.token"
+
+  if ! systemctl restart vvr-traffic-api.service; then
+    warn "Token 已写入，但 API 服务重启失败；请检查：systemctl status vvr-traffic-api.service --no-pager"
+    return
+  fi
+  if systemctl is-active --quiet vvr-traffic-api.service; then
+    ok "API Token 已重置，旧 Token 已失效。"
+    echo "新 Token（请勿截图或发送给他人）：${new_token}"
+    echo "请立即将新 Token 填入 MiSub 的对应面板并保存。"
+  else
+    warn "Token 已写入，但 API 服务未正常运行，请检查：systemctl status vvr-traffic-api.service --no-pager"
+  fi
+}
+
 traffic_status() {
   if [ ! -x "${TRAFFIC_SCRIPT}" ]; then
     echo "流量统计组件未安装。"
@@ -2623,6 +2664,7 @@ manage_traffic() {
     echo " 6. 修改服务器时区（当前：$(server_timezone)）"
     echo " 7. 开启/关闭流量采集"
     echo " 8. 设置 API 访问方式"
+    echo " 9. 重置 API Token（旧 Token 立即失效）"
     echo " 0. 返回主菜单"
     echo
     printf '请选择操作: '
@@ -2676,6 +2718,7 @@ manage_traffic() {
           continue
         fi
         ;;
+      9) rotate_traffic_token ;;
       0) return ;;
       *) echo "无效选择，请重新输入。" ;;
     esac
