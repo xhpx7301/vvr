@@ -1314,7 +1314,7 @@ warn_unavailable_outbound_mode() {
         warn "当前检测不到 IPv6 出站；仅 IPv6 模式的规则很可能无法访问目标。"
         printf '仍要继续使用仅 IPv6 吗？[y/N]: '
         read -r answer
-        case "${answer}" in y|Y|yes|YES) ;; *) MENU_CANCELLED=1; return ;; esac
+        case "${answer}" in y|Y|yes|YES) ;; *) MENU_CANCELLED=1; return 0 ;; esac
       fi
       ;;
     ipv4)
@@ -1322,7 +1322,7 @@ warn_unavailable_outbound_mode() {
         warn "当前检测不到 IPv4 出站；仅 IPv4 模式的规则很可能无法访问目标。"
         printf '仍要继续使用仅 IPv4 吗？[y/N]: '
         read -r answer
-        case "${answer}" in y|Y|yes|YES) ;; *) MENU_CANCELLED=1; return ;; esac
+        case "${answer}" in y|Y|yes|YES) ;; *) MENU_CANCELLED=1; return 0 ;; esac
       fi
       ;;
     ipv6v4)
@@ -1617,7 +1617,7 @@ choose_outbound_mode() {
     printf '选择出站模式 [%s]: ' "${default}"
     read -r input
     case "${input:-${default}}" in
-      0) MENU_CANCELLED=1; return ;;
+      0) MENU_CANCELLED=1; return 0 ;;
       1) SELECTED_OUTBOUND_MODE="ipv4" ;;
       2) SELECTED_OUTBOUND_MODE="ipv6" ;;
       3) SELECTED_OUTBOUND_MODE="ipv4v6" ;;
@@ -1637,7 +1637,7 @@ configure_happy_eyeballs_delay() {
   while :; do
     printf '连接竞速延迟（毫秒，25-2000；输入 0 返回）[%s]: ' "${HAPPY_EYEBALLS_DELAY_MS}"
     read -r input
-    [ "${input}" = "0" ] && return
+    [ "${input}" = "0" ] && return 0
     input="${input:-${HAPPY_EYEBALLS_DELAY_MS}}"
     case "${input}" in
       ''|*[!0-9]*) echo "请输入 25 到 2000 的整数。"; continue ;;
@@ -1686,7 +1686,9 @@ add_domain_rule() {
   echo
   echo "选择此规则使用的出站模式："
   choose_outbound_mode "${BASE_OUTBOUND_MODE}"
-  [ "${MENU_CANCELLED}" -eq 0 ] || return
+  if [ "${MENU_CANCELLED}" -ne 0 ]; then
+    return 0
+  fi
   echo "域名匹配类型："
   echo "  1. 精确匹配，例如 api.example.com"
   echo "  2. 后缀匹配，例如 example.com 会匹配其子域名"
@@ -1695,7 +1697,7 @@ add_domain_rule() {
     printf '选择匹配类型 [1]: '
     read -r input
     case "${input:-1}" in
-      0) MENU_CANCELLED=1; return ;;
+      0) MENU_CANCELLED=1; return 0 ;;
       1) route_type="full"; break ;;
       2) route_type="domain"; break ;;
       *) echo "无效的域名匹配类型，请输入 0、1 或 2。" ;;
@@ -1705,7 +1707,7 @@ add_domain_rule() {
     printf '输入域名（输入 0 返回）: '
     read -r domain
     case "${domain}" in
-      0) MENU_CANCELLED=1; return ;;
+      0) MENU_CANCELLED=1; return 0 ;;
       ''|*[!A-Za-z0-9.-]*) echo "域名格式无效。" ;;
       *) break ;;
     esac
@@ -1721,12 +1723,14 @@ add_geosite_rule() {
   echo
   echo "选择此规则使用的出站模式："
   choose_outbound_mode "${BASE_OUTBOUND_MODE}"
-  [ "${MENU_CANCELLED}" -eq 0 ] || return
+  if [ "${MENU_CANCELLED}" -ne 0 ]; then
+    return 0
+  fi
   while :; do
     printf '输入 geosite 名称（例如 youtube；输入 0 返回）: '
     read -r geosite
     case "${geosite}" in
-      0) MENU_CANCELLED=1; return ;;
+      0) MENU_CANCELLED=1; return 0 ;;
       ''|*[!A-Za-z0-9._@!:-]*) echo "geosite 名称格式无效。" ;;
       *) break ;;
     esac
@@ -1914,7 +1918,7 @@ ensure_tcpdump() {
 capture_outbound_connections() {
   local input filter label
   MENU_RETURNED=0
-  ensure_tcpdump || return
+  ensure_tcpdump || return 0
   while :; do
     echo
     echo "实时抓取 HTTPS 连接（仅显示包头，不抓取内容）："
@@ -1928,7 +1932,7 @@ capture_outbound_connections() {
       1) filter='ip and tcp port 443'; label='IPv4' ;;
       2) filter='ip6 and tcp port 443'; label='IPv6' ;;
       3) filter='(ip or ip6) and tcp port 443'; label='IPv4 / IPv6' ;;
-      0) MENU_RETURNED=1; return ;;
+      0) MENU_RETURNED=1; return 0 ;;
       *) echo "无效选择，请重新输入。"; continue ;;
     esac
     echo
@@ -2018,7 +2022,7 @@ test_selected_outbound_rule() {
     printf '测试 URL（例如 https://www.youtube.com/；输入 0 返回）: '
     read -r test_url
     case "${test_url}" in
-      0) MENU_RETURNED=1; return ;;
+      0) MENU_RETURNED=1; return 0 ;;
       http://*|https://*)
         case "${test_url}" in *[[:space:]]*) echo "URL 不能包含空格。" ;; *) break ;; esac
         ;;

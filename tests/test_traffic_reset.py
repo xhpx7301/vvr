@@ -16,6 +16,7 @@ INSTALLER = Path(__file__).resolve().parents[1] / "install-xray-vless-ipv6-youtu
 SOURCE = INSTALLER.read_text(encoding="utf-8")
 TRAFFIC_SOURCE = SOURCE.split('cat > "${TRAFFIC_SCRIPT}" <<\'PY\'\n', 1)[1].split("\nPY\n", 1)[0]
 MANAGER_SOURCE = SOURCE.split('cat > "${MANAGER_BIN}" <<\'EOF\'\n', 1)[1].split("\nEOF\n", 1)[0]
+MANAGER_LIBRARY = MANAGER_SOURCE.rsplit('\nmain "$@"', 1)[0]
 
 
 class TrafficResetTests(unittest.TestCase):
@@ -185,6 +186,35 @@ class MenuSettingsTests(unittest.TestCase):
             'load_traffic_settings\n[ "$AUTO_RESET_ENABLED" = "0" ]\n',
             "1\n0\n", "AUTO_RESET_ENABLED='0'\n",
         )
+
+
+@unittest.skipUnless(SHELL, "Set VVR_TEST_SHELL to a POSIX shell to test menu navigation")
+class MenuNavigationTests(unittest.TestCase):
+    def assert_outbound_menu_returns(self, choice):
+        with tempfile.TemporaryDirectory() as directory:
+            script = (
+                MANAGER_LIBRARY
+                + "\nROUTES_FILE=./routes.rules\nBASE_OUTBOUND_MODE=ipv4\n"
+                + "HAPPY_EYEBALLS_DELAY_MS=100\n"
+                + "load_state() { :; }\nensure_routes_file() { :; }\n"
+                + "refresh_network_status() { :; }\nshow_network_status() { :; }\n"
+                + "apply_config() { :; }\n"
+                + "manage_outbound_strategy\nprintf '__menu_returned__\\n'\n"
+            )
+            script_path = Path(directory, "menu-navigation.sh")
+            script_path.write_text(script, encoding="utf-8", newline="\n")
+            result = subprocess.run(
+                [SHELL, str(script_path)], input=(choice + "\n0\n0\n").encode("utf-8"),
+                capture_output=True, cwd=directory,
+            )
+            output = (result.stdout + result.stderr).decode("utf-8", errors="replace")
+            self.assertEqual(result.returncode, 0, output)
+            self.assertIn("__menu_returned__", output)
+
+    def test_cancelling_outbound_selector_returns_to_strategy_menu(self):
+        for choice in ("1", "3", "4"):
+            with self.subTest(choice=choice):
+                self.assert_outbound_menu_returns(choice)
 
 
 if __name__ == "__main__":
