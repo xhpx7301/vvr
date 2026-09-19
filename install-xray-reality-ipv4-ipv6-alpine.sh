@@ -23,6 +23,11 @@ DEFAULT_INSTALLER_URL="https://raw.githubusercontent.com/xhpx7301/vvr/main/insta
 FINGERPRINT="chrome"
 SPIDERX="%2F"
 TMP_DIR=""
+INSTALL_ROLLBACK_DIR=""
+INSTALL_BACKUP_READY="0"
+EXISTING_SERVICE_WAS_RUNNING="0"
+EXISTING_SERVICE_WAS_ENABLED="0"
+INSTALL_COMMITTED="0"
 
 if [ -t 1 ]; then
   BLUE="$(printf '\033[1;34m')"
@@ -47,6 +52,71 @@ cleanup() {
   if [ -n "${TMP_DIR}" ] && [ -d "${TMP_DIR}" ]; then
     rm -rf "${TMP_DIR}"
   fi
+}
+
+backup_existing_install() {
+  INSTALL_ROLLBACK_DIR="${TMP_DIR}/rollback"
+  mkdir -p "${INSTALL_ROLLBACK_DIR}"
+
+  if [ -d "${XRAY_DIR}" ]; then
+    cp -a "${XRAY_DIR}" "${INSTALL_ROLLBACK_DIR}/xray-dir"
+  fi
+  if [ -d "${CONFIG_DIR}" ]; then
+    cp -a "${CONFIG_DIR}" "${INSTALL_ROLLBACK_DIR}/config-dir"
+  fi
+  if [ -f "${SERVICE_FILE}" ]; then
+    cp -a "${SERVICE_FILE}" "${INSTALL_ROLLBACK_DIR}/xray-service"
+  fi
+  if [ -f "${MANAGER_BIN}" ]; then
+    cp -a "${MANAGER_BIN}" "${INSTALL_ROLLBACK_DIR}/vvr-manager"
+  fi
+  INSTALL_BACKUP_READY="1"
+}
+
+rollback_install() {
+  [ "${INSTALL_COMMITTED:-0}" = "0" ] || return 0
+  [ "${INSTALL_BACKUP_READY:-0}" = "1" ] || return 0
+  [ -n "${INSTALL_ROLLBACK_DIR:-}" ] || return 0
+  [ -d "${INSTALL_ROLLBACK_DIR}" ] || return 0
+
+  warn "安装未完成，正在恢复安装前的 Xray 状态..."
+  rc-service xray stop >/dev/null 2>&1 || true
+
+  rm -rf "${XRAY_DIR}" "${CONFIG_DIR}"
+  rm -f "${SERVICE_FILE}" "${MANAGER_BIN}"
+  if [ "${EXISTING_SERVICE_WAS_ENABLED:-0}" != "1" ]; then
+    rc-update del xray default >/dev/null 2>&1 || true
+  fi
+  if [ -d "${INSTALL_ROLLBACK_DIR}/xray-dir" ]; then
+    cp -a "${INSTALL_ROLLBACK_DIR}/xray-dir" "${XRAY_DIR}"
+  fi
+  if [ -d "${INSTALL_ROLLBACK_DIR}/config-dir" ]; then
+    cp -a "${INSTALL_ROLLBACK_DIR}/config-dir" "${CONFIG_DIR}"
+  fi
+  if [ -f "${INSTALL_ROLLBACK_DIR}/xray-service" ]; then
+    cp -a "${INSTALL_ROLLBACK_DIR}/xray-service" "${SERVICE_FILE}"
+  fi
+  if [ -f "${INSTALL_ROLLBACK_DIR}/vvr-manager" ]; then
+    cp -a "${INSTALL_ROLLBACK_DIR}/vvr-manager" "${MANAGER_BIN}"
+  fi
+
+  if [ "${EXISTING_SERVICE_WAS_RUNNING:-0}" = "1" ] && [ -f "${SERVICE_FILE}" ]; then
+    if rc-service xray start >/dev/null 2>&1; then
+      ok "旧 Xray 服务已恢复运行。"
+    else
+      warn "旧文件已恢复，但旧 Xray 服务未能自动启动，请运行：rc-service xray start"
+    fi
+  fi
+}
+
+installer_exit() {
+  STATUS=$?
+  trap - 0 INT TERM HUP
+  if [ "${STATUS}" -ne 0 ]; then
+    rollback_install
+  fi
+  cleanup
+  exit "${STATUS}"
 }
 
 need_root() {
@@ -301,19 +371,30 @@ confirm_inputs() {
 handle_existing_install() {
   if [ -f "${SERVICE_FILE}" ] || [ -f "${CONFIG_FILE}" ] || [ -x "${XRAY_BIN}" ]; then
     warn "检测到已有 Xray 安装。"
-    printf '是否停止旧服务并替换现有配置？[y/N]: '
+    printf '是否替换现有安装和配置？脚本会先备份，失败时自动恢复。[y/N]: '
     read -r ANSWER
     case "${ANSWER}" in
       y|Y|yes|YES)
-        rc-service xray stop >/dev/null 2>&1 || true
-        if [ -f "${CONFIG_FILE}" ]; then
-          BACKUP_FILE="${CONFIG_FILE}.bak.$(date +%Y%m%d%H%M%S)"
-          cp -a "${CONFIG_FILE}" "${BACKUP_FILE}"
-          info "旧配置已备份到 ${BACKUP_FILE}"
+        if rc-service xray status >/dev/null 2>&1; then
+          EXISTING_SERVICE_WAS_RUNNING="1"
         fi
+        if [ -e /etc/runlevels/default/xray ]; then
+          EXISTING_SERVICE_WAS_ENABLED="1"
+        fi
+        backup_existing_install
+        info "旧安装已临时备份；下载完成后才会停止旧服务并执行替换。"
         ;;
       *) fail "已取消，未覆盖现有安装。" ;;
     esac
+  else
+    backup_existing_install
+  fi
+}
+
+prepare_for_replacement() {
+  if [ "${EXISTING_SERVICE_WAS_RUNNING:-0}" = "1" ]; then
+    info "停止旧 Xray 服务，开始替换安装..."
+    rc-service xray stop >/dev/null 2>&1 || fail "无法停止旧 Xray 服务。"
   fi
 }
 
@@ -348,15 +429,42 @@ install_xray() {
 
 generate_values() {
   info "生成 UUID、REALITY 密钥和 shortId..."
-  UUID="$("${XRAY_BIN}" uuid)"
-  KEYS="$("${XRAY_BIN}" x25519 2>&1)"
-  PRIVATE_KEY="$(printf '%s\n' "${KEYS}" | awk '{line=tolower($0); if (line ~ /private/ && line ~ /key/) {sub(/.*[:=][ \t]*/, "", $0); gsub(/[",]/, "", $0); print $1; exit}}')"
-  PUBLIC_KEY="$(printf '%s\n' "${KEYS}" | awk '{line=tolower($0); if (line ~ /public/ && line ~ /key/) {sub(/.*[:=][ \t]*/, "", $0); gsub(/[",]/, "", $0); print $1; exit}}')"
-  SHORT_ID="$(openssl rand -hex 8)"
-  [ -n "${UUID}" ] || fail "生成 UUID 失败。"
-  [ -n "${PRIVATE_KEY}" ] || fail "生成 REALITY 私钥失败。"
-  [ -n "${PUBLIC_KEY}" ] || fail "生成 REALITY 公钥失败。"
-  [ -n "${SHORT_ID}" ] || fail "生成 shortId 失败。"
+  UUID_OUTPUT=""
+  if ! UUID_OUTPUT="$("${XRAY_BIN}" uuid 2>&1)"; then
+    [ -z "${UUID_OUTPUT}" ] || printf '%s\n' "${UUID_OUTPUT}" >&2
+    fail "Xray 生成 UUID 失败。"
+  fi
+  UUID="$(printf '%s' "${UUID_OUTPUT}" | tr -d '\r\n[:space:]')"
+  if ! printf '%s\n' "${UUID}" | grep -Eq '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$'; then
+    fail "Xray 返回的 UUID 格式无效。"
+  fi
+  info "UUID 已生成。"
+
+  KEYS=""
+  if ! KEYS="$("${XRAY_BIN}" x25519 2>&1)"; then
+    [ -z "${KEYS}" ] || printf '%s\n' "${KEYS}" >&2
+    fail "Xray 生成 REALITY X25519 密钥失败。"
+  fi
+  PRIVATE_KEY="$(printf '%s\n' "${KEYS}" | awk '{line=tolower($0); if (line ~ /private/ && line ~ /key/) {sub(/.*[:=][ \t]*/, "", $0); gsub(/[\r",]/, "", $0); print $1; exit}}')"
+  PUBLIC_KEY="$(printf '%s\n' "${KEYS}" | awk '{line=tolower($0); if ((line ~ /public/ && line ~ /key/) || line ~ /^password[ \t]*:/) {sub(/.*[:=][ \t]*/, "", $0); gsub(/[\r",]/, "", $0); print $1; exit}}')"
+  if ! printf '%s\n' "${PRIVATE_KEY}" | grep -Eq '^[A-Za-z0-9_-]{43}$'; then
+    fail "无法从 Xray 输出中解析有效的 REALITY 私钥。"
+  fi
+  if ! printf '%s\n' "${PUBLIC_KEY}" | grep -Eq '^[A-Za-z0-9_-]{43}$'; then
+    fail "无法从 Xray 输出中解析有效的 REALITY 公钥；当前 Xray 可能使用了未兼容的输出格式。"
+  fi
+  info "REALITY X25519 密钥已生成并解析。"
+
+  SHORT_ID_OUTPUT=""
+  if ! SHORT_ID_OUTPUT="$(openssl rand -hex 8 2>&1)"; then
+    [ -z "${SHORT_ID_OUTPUT}" ] || printf '%s\n' "${SHORT_ID_OUTPUT}" >&2
+    fail "OpenSSL 生成 shortId 失败。"
+  fi
+  SHORT_ID="$(printf '%s' "${SHORT_ID_OUTPUT}" | tr -d '\r\n[:space:]')"
+  if ! printf '%s\n' "${SHORT_ID}" | grep -Eq '^[0-9A-Fa-f]{16}$'; then
+    fail "OpenSSL 返回的 shortId 格式无效。"
+  fi
+  info "shortId 已生成。"
 }
 
 ensure_routes_file() {
@@ -370,6 +478,7 @@ initialize_routes_file() {
   mkdir -p "${CONFIG_DIR}"
   : > "${ROUTES_FILE}"
   chmod 0600 "${ROUTES_FILE}"
+  info "初始路由规则文件已建立（当前无自定义规则）。"
 }
 
 outbound_tag_for_mode() {
@@ -464,6 +573,7 @@ ${ROUTING_RULES}      {"type": "field", "inboundTag": ["vless-in"], "outboundTag
 }
 CONFIG
   chmod 0600 "${CONFIG_FILE}"
+  info "Xray 配置文件已写入。"
 }
 
 test_config() {
@@ -984,7 +1094,10 @@ print_result() {
 installer_main() {
   need_root
   need_alpine
-  trap cleanup 0 INT TERM HUP
+  trap installer_exit 0
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
   install_deps
   detect_arch
   prepare_tmp
@@ -1001,8 +1114,9 @@ installer_main() {
   confirm_inputs
 
   handle_existing_install
-  check_port_available "" || fail "端口 ${PORT} 已被占用。"
   download_xray
+  prepare_for_replacement
+  check_port_available "" || fail "端口 ${PORT} 已被占用。"
   install_xray
   generate_values
   initialize_routes_file
@@ -1013,6 +1127,7 @@ installer_main() {
   start_service
   save_state
   install_manager
+  INSTALL_COMMITTED="1"
   print_result
 }
 
