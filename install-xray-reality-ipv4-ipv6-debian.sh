@@ -1,14 +1,15 @@
 #!/usr/bin/env sh
 set -eu
 
-# Debian installer for VLESS + REALITY with IPv4/IPv6 YouTube split routing.
+# Debian installer for VLESS + REALITY with configurable IPv4/IPv6 routing.
 
 XRAY_BIN="/usr/local/bin/xray"
 XRAY_ASSET_DIR="/usr/local/share/xray"
 CONFIG_DIR="/etc/xray"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 SERVICE_FILE="/etc/systemd/system/xray.service"
-META_FILE="${CONFIG_DIR}/vless-ipv6-youtube.env"
+META_FILE="${CONFIG_DIR}/vless-reality-ipv4-ipv6.env"
+LEGACY_META_FILE="${CONFIG_DIR}/vless-ipv6-youtube.env"
 ROUTES_FILE="${CONFIG_DIR}/vvr-routing.rules"
 NETWORK_STATUS_FILE="${CONFIG_DIR}/vvr-network-status.env"
 TRAFFIC_DIR="/var/lib/vvr"
@@ -24,7 +25,7 @@ TMP_DIR=""
 
 DEFAULT_PORT="443"
 DEFAULT_SNI="www.sony.com"
-DEFAULT_TAG="vvr-vless-ipv6-youtube"
+DEFAULT_TAG="vvr-reality-ipv4-ipv6"
 DEFAULT_FALLBACK_PORT="4431"
 DEFAULT_LIMIT_AFTER_BYTES="1048576"
 DEFAULT_LIMIT_UPLOAD_BPS="65536"
@@ -69,12 +70,44 @@ check_debian() {
   [ -f /etc/debian_version ] || fail "此脚本仅支持 Debian 及其兼容系统。"
 }
 
+installation_present() {
+  [ -e "${CONFIG_FILE}" ] || [ -e "${SERVICE_FILE}" ] || [ -x "${XRAY_BIN}" ]
+}
+
+installation_complete() {
+  [ -f "${CONFIG_FILE}" ] &&
+    [ -f "${SERVICE_FILE}" ] &&
+    [ -x "${XRAY_BIN}" ] &&
+    { [ -f "${META_FILE}" ] || [ -f "${LEGACY_META_FILE}" ]; }
+}
+
+migrate_legacy_metadata() {
+  if [ ! -f "${META_FILE}" ] && [ -f "${LEGACY_META_FILE}" ]; then
+    cp -a "${LEGACY_META_FILE}" "${META_FILE}"
+    chmod 0600 "${META_FILE}"
+    info "节点元数据已迁移到 ${META_FILE}。"
+  fi
+}
+
 install_dependencies() {
+  local package missing_packages
   command -v apt-get >/dev/null 2>&1 || fail "未找到 apt-get。"
-  info "安装必要依赖..."
+  missing_packages=""
+  for package in ca-certificates curl openssl unzip python3; do
+    if ! dpkg-query -W -f='${Status}\n' "${package}" 2>/dev/null | grep -qx 'install ok installed'; then
+      missing_packages="${missing_packages} ${package}"
+    fi
+  done
+  if [ -z "${missing_packages}" ]; then
+    info "必要依赖已满足，跳过 apt 更新和安装。"
+    return 0
+  fi
+
+  info "安装缺失依赖：${missing_packages# }"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get install -y --no-install-recommends ca-certificates curl openssl unzip python3
+  # shellcheck disable=SC2086
+  apt-get install -y --no-install-recommends ${missing_packages}
 }
 
 detect_arch() {
@@ -97,17 +130,23 @@ download_xray() {
   extract_dir="${TMP_DIR}/extract"
   info "下载最新 Xray-core..."
   curl -fL --retry 3 -A "vvr-xray-installer" "${XRAY_URL}" -o "${archive}"
-  mkdir -p "${extract_dir}" "${XRAY_ASSET_DIR}"
+  mkdir -p "${extract_dir}"
   unzip -qo "${archive}" -d "${extract_dir}"
   [ -f "${extract_dir}/xray" ] || fail "安装包中没有找到 Xray 可执行文件。"
-  install -m 0755 "${extract_dir}/xray" "${XRAY_BIN}"
+  [ -f "${extract_dir}/geosite.dat" ] || fail "安装包中没有找到 geosite.dat，无法使用 geosite 域名规则。"
+}
+
+install_xray_release() {
+  local extract_dir asset
+  extract_dir="${TMP_DIR}/extract"
+  mkdir -p "${XRAY_ASSET_DIR}" || return 1
+  install -m 0755 "${extract_dir}/xray" "${XRAY_BIN}" || return 1
   for asset in geoip.dat geosite.dat; do
     if [ -f "${extract_dir}/${asset}" ]; then
-      install -m 0644 "${extract_dir}/${asset}" "${XRAY_ASSET_DIR}/${asset}"
+      install -m 0644 "${extract_dir}/${asset}" "${XRAY_ASSET_DIR}/${asset}" || return 1
     fi
   done
-  [ -f "${XRAY_ASSET_DIR}/geosite.dat" ] || fail "安装包中没有找到 geosite.dat，无法使用 YouTube 规则。"
-  "${XRAY_BIN}" version | head -n 1
+  "${XRAY_BIN}" version | head -n 1 || return 1
 }
 
 prompt_values() {
@@ -444,9 +483,9 @@ generate_values() {
 }
 
 handle_existing_install() {
-  if [ -e "${CONFIG_FILE}" ] || [ -e "${SERVICE_FILE}" ] || [ -x "${XRAY_BIN}" ]; then
-    warn "检测到已有 Xray 安装。"
-    printf '是否备份并替换现有配置？[y/N]: '
+  if installation_present; then
+    warn "重新安装会生成新的 UUID、REALITY 密钥和 shortId，旧客户端链接将失效。"
+    printf '确认备份并重新安装节点？[y/N]: '
     read -r answer
     case "${answer}" in
       y|Y|yes|YES)
@@ -455,7 +494,7 @@ handle_existing_install() {
           cp -a "${CONFIG_FILE}" "${CONFIG_FILE}.bak.$(date +%Y%m%d%H%M%S)"
         fi
         ;;
-      *) fail "已取消，未覆盖现有安装。" ;;
+      *) fail "已取消重新安装，现有节点未被覆盖。" ;;
     esac
   fi
 }
@@ -468,7 +507,7 @@ write_config() {
   ROUTING_RULES=""
 
   if [ ! -f "${ROUTES_FILE}" ]; then
-    printf '%s\n' 'ipv6|geosite|youtube' > "${ROUTES_FILE}"
+    : > "${ROUTES_FILE}"
     chmod 0600 "${ROUTES_FILE}"
   fi
 
@@ -748,9 +787,9 @@ EOF
 }
 
 write_service() {
-  cat > "${SERVICE_FILE}" <<EOF
+  cat > "${SERVICE_FILE}" <<EOF || return 1
 [Unit]
-Description=Xray VLESS REALITY IPv6 YouTube split node
+Description=Xray VLESS REALITY IPv4/IPv6 node
 Documentation=https://xtls.github.io/
 After=network-online.target
 Wants=network-online.target
@@ -768,7 +807,7 @@ PrivateTmp=true
 [Install]
 WantedBy=multi-user.target
 EOF
-  chmod 0644 "${SERVICE_FILE}"
+  chmod 0644 "${SERVICE_FILE}" || return 1
 }
 
 write_traffic_components() {
@@ -942,7 +981,7 @@ class Handler(BaseHTTPRequestHandler):
             "success": True,
             "obj": [{
                 "id": 1,
-                "remark": os.environ.get("VVR_INBOUND_REMARK", "vvr-vless-ipv6-youtube"),
+                "remark": os.environ.get("VVR_INBOUND_REMARK", "vvr-reality-ipv4-ipv6"),
                 "tag": "vless-in",
                 "protocol": "vless",
                 "up": int(traffic.get("up", 0)),
@@ -1110,6 +1149,93 @@ validate_and_start() {
   }
 }
 
+backup_runtime_for_update() {
+  UPDATE_BACKUP_DIR="${TMP_DIR}/update-backup"
+  mkdir -p "${UPDATE_BACKUP_DIR}"
+  cp -a "${XRAY_BIN}" "${UPDATE_BACKUP_DIR}/xray"
+  cp -a "${SERVICE_FILE}" "${UPDATE_BACKUP_DIR}/xray.service"
+  if [ -f "${XRAY_ASSET_DIR}/geoip.dat" ]; then
+    cp -a "${XRAY_ASSET_DIR}/geoip.dat" "${UPDATE_BACKUP_DIR}/geoip.dat"
+  fi
+  if [ -f "${XRAY_ASSET_DIR}/geosite.dat" ]; then
+    cp -a "${XRAY_ASSET_DIR}/geosite.dat" "${UPDATE_BACKUP_DIR}/geosite.dat"
+  fi
+}
+
+restore_runtime_after_failed_update() {
+  local asset
+  warn "正在恢复更新前的 Xray 运行文件..."
+  install -m 0755 "${UPDATE_BACKUP_DIR}/xray" "${XRAY_BIN}"
+  cp -a "${UPDATE_BACKUP_DIR}/xray.service" "${SERVICE_FILE}"
+  for asset in geoip.dat geosite.dat; do
+    if [ -f "${UPDATE_BACKUP_DIR}/${asset}" ]; then
+      cp -a "${UPDATE_BACKUP_DIR}/${asset}" "${XRAY_ASSET_DIR}/${asset}"
+    else
+      rm -f "${XRAY_ASSET_DIR}/${asset}"
+    fi
+  done
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  if ! systemctl restart xray >/dev/null 2>&1; then
+    warn "旧版 Xray 自动恢复后未能启动，请检查：journalctl -u xray -n 80 --no-pager"
+  fi
+}
+
+test_existing_config() {
+  local test_output
+  test_output="${TMP_DIR}/update-config-test.log"
+  if ! XRAY_LOCATION_ASSET="${XRAY_ASSET_DIR}" "${XRAY_BIN}" run -test -config "${CONFIG_FILE}" >"${test_output}" 2>&1; then
+    cat "${test_output}" >&2
+    return 1
+  fi
+  return 0
+}
+
+safe_update() {
+  installation_complete || fail "现有安装不完整，无法安全更新；请检查文件后使用 --reinstall。"
+  info "检测到现有节点，进入安全更新模式。"
+  info "节点配置、UUID、REALITY 密钥、分流规则和 API Token 均会保留。"
+
+  install_dependencies
+  detect_arch
+  prepare_tmp
+  download_xray
+  backup_runtime_for_update
+
+  if ! install_xray_release; then
+    restore_runtime_after_failed_update
+    fail "安装新版 Xray 文件失败，已恢复旧版本。"
+  fi
+  if ! write_service; then
+    restore_runtime_after_failed_update
+    fail "更新 systemd 服务文件失败，已恢复旧版本。"
+  fi
+  if ! test_existing_config; then
+    restore_runtime_after_failed_update
+    fail "新版 Xray 无法读取现有配置，已恢复旧版本。"
+  fi
+
+  if ! systemctl daemon-reload; then
+    restore_runtime_after_failed_update
+    fail "systemd 重新加载失败，已恢复旧版本。"
+  fi
+  if ! systemctl restart xray; then
+    journalctl -u xray -n 80 --no-pager || true
+    restore_runtime_after_failed_update
+    fail "新版 Xray 重启失败，已恢复旧版本。"
+  fi
+  sleep 2
+  if ! systemctl is-active --quiet xray; then
+    journalctl -u xray -n 80 --no-pager || true
+    restore_runtime_after_failed_update
+    fail "新版 Xray 服务状态异常，已恢复旧版本。"
+  fi
+
+  migrate_legacy_metadata
+  write_traffic_components
+  write_manager_command
+  ok "安全更新完成；现有节点链接和分流规则保持不变。"
+}
+
 write_manager_command() {
   info "正在安装 vvr 管理命令..."
   cat > "${MANAGER_BIN}" <<'EOF'
@@ -1120,7 +1246,8 @@ XRAY_BIN="/usr/local/bin/xray"
 XRAY_ASSET_DIR="/usr/local/share/xray"
 CONFIG_DIR="/etc/xray"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
-META_FILE="${CONFIG_DIR}/vless-ipv6-youtube.env"
+META_FILE="${CONFIG_DIR}/vless-reality-ipv4-ipv6.env"
+LEGACY_META_FILE="${CONFIG_DIR}/vless-ipv6-youtube.env"
 ROUTES_FILE="${CONFIG_DIR}/vvr-routing.rules"
 NETWORK_STATUS_FILE="${CONFIG_DIR}/vvr-network-status.env"
 TRAFFIC_DIR="/var/lib/vvr"
@@ -1136,7 +1263,7 @@ MANAGER_BIN="/usr/local/bin/vvr"
 
 DEFAULT_PORT="443"
 DEFAULT_SNI="www.sony.com"
-DEFAULT_TAG="vvr-vless-ipv6-youtube"
+DEFAULT_TAG="vvr-reality-ipv4-ipv6"
 DEFAULT_FALLBACK_PORT="4431"
 DEFAULT_LIMIT_AFTER_BYTES="1048576"
 DEFAULT_LIMIT_UPLOAD_BPS="65536"
@@ -1172,6 +1299,10 @@ need_root() {
 }
 
 load_state() {
+  if [ ! -f "${META_FILE}" ] && [ -f "${LEGACY_META_FILE}" ]; then
+    cp -a "${LEGACY_META_FILE}" "${META_FILE}"
+    chmod 0600 "${META_FILE}"
+  fi
   [ -f "${META_FILE}" ] || fail "未找到节点信息文件：${META_FILE}。请重新运行安装脚本。"
   # shellcheck disable=SC1090
   . "${META_FILE}"
@@ -1655,7 +1786,7 @@ configure_happy_eyeballs_delay() {
 
 ensure_routes_file() {
   if [ ! -f "${ROUTES_FILE}" ]; then
-    printf '%s\n' 'ipv6|geosite|youtube' > "${ROUTES_FILE}"
+    : > "${ROUTES_FILE}"
     chmod 0600 "${ROUTES_FILE}"
   fi
 }
@@ -3254,23 +3385,19 @@ print_result() {
   echo "客户端链接："
   echo "${uri}"
   echo
-  warn "请确认 VPS 到 YouTube 的 IPv6 可达，并检查 IPv6 的 GeoIP 归属。"
+  warn "请根据所选出站策略确认 VPS 的 IPv4/IPv6 连通性和地址归属。"
 }
 
-main() {
-  need_root
-  check_debian
-  if [ "${1:-}" = "--update-traffic-api" ]; then
-    write_traffic_components
-    write_manager_command
-    ok "流量 API 和 vvr 管理命令已更新；现有 Xray 配置、节点密钥和 API Token 保持不变。"
-    return 0
-  fi
+full_install() {
+  local install_mode="$1"
   install_dependencies
   detect_arch
   prepare_tmp
-  handle_existing_install
   download_xray
+  if [ "${install_mode}" = "reinstall" ]; then
+    handle_existing_install
+  fi
+  install_xray_release || fail "安装 Xray 文件失败。"
   prompt_values
   generate_values
   write_config
@@ -3282,13 +3409,51 @@ main() {
   print_result
 }
 
+main() {
+  need_root
+  check_debian
+  case "${1:-}" in
+    '')
+      if installation_complete; then
+        safe_update
+      elif installation_present; then
+        fail "检测到不完整或非本脚本管理的 Xray 安装；请检查后使用 --reinstall。"
+      else
+        full_install install
+      fi
+      ;;
+    --update)
+      installation_complete || fail "未检测到可安全更新的完整安装；首次安装请不带参数运行。"
+      safe_update
+      ;;
+    --reinstall)
+      full_install reinstall
+      ;;
+    --update-traffic-api)
+      installation_complete || fail "未检测到完整安装，无法单独更新流量 API。"
+      install_dependencies
+      migrate_legacy_metadata
+      write_traffic_components
+      write_manager_command
+      ok "流量 API 和 vvr 管理命令已更新；现有 Xray 配置、节点密钥和 API Token 保持不变。"
+      ;;
+    *)
+      echo "用法：$0 [--update|--reinstall|--update-traffic-api]" >&2
+      echo "  无参数              首次安装；已有完整安装时自动安全更新" >&2
+      echo "  --update            安全更新 Xray 和管理组件，保留节点配置与凭据" >&2
+      echo "  --reinstall         重新安装并生成新节点凭据，旧客户端链接会失效" >&2
+      echo "  --update-traffic-api 仅更新 MiSub/3X-UI 流量 API 和管理命令" >&2
+      exit 2
+      ;;
+  esac
+}
+
 case "${1:-}" in
-  ''|--update-traffic-api)
+  ''|--update|--reinstall|--update-traffic-api)
     main "$@"
     ;;
   *)
-    echo "用法：$0 [--update-traffic-api]" >&2
-    echo "  --update-traffic-api 仅更新 MiSub/3X-UI 流量 API，不改动 Xray 节点配置。" >&2
+    echo "用法：$0 [--update|--reinstall|--update-traffic-api]" >&2
     exit 2
     ;;
 esac

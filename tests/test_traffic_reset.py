@@ -12,11 +12,17 @@ from datetime import datetime
 from unittest.mock import patch
 
 
-INSTALLER = Path(__file__).resolve().parents[1] / "install-xray-vless-ipv6-youtube-debian.sh"
+INSTALLER = Path(__file__).resolve().parents[1] / "install-xray-reality-ipv4-ipv6-debian.sh"
 SOURCE = INSTALLER.read_text(encoding="utf-8")
 TRAFFIC_SOURCE = SOURCE.split('cat > "${TRAFFIC_SCRIPT}" <<\'PY\'\n', 1)[1].split("\nPY\n", 1)[0]
 MANAGER_SOURCE = SOURCE.split('cat > "${MANAGER_BIN}" <<\'EOF\'\n', 1)[1].split("\nEOF\n", 1)[0]
 MANAGER_LIBRARY = MANAGER_SOURCE.rsplit('\nmain "$@"', 1)[0]
+INSTALLER_LIBRARY = SOURCE.rsplit('\ncase "${1:-}" in', 1)[0]
+
+
+class InstallerDefaultsTests(unittest.TestCase):
+    def test_no_default_youtube_route(self):
+        self.assertNotIn("ipv6|geosite|youtube", SOURCE)
 
 
 class TrafficResetTests(unittest.TestCase):
@@ -135,6 +141,57 @@ class TrafficResetTests(unittest.TestCase):
 
 
 SHELL = os.environ.get("VVR_TEST_SHELL") or shutil.which("sh")
+
+
+@unittest.skipUnless(SHELL, "Set VVR_TEST_SHELL to a POSIX shell to test installer modes")
+class InstallerModeTests(unittest.TestCase):
+    def run_shell(self, body, executables=None):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            if executables:
+                binary_dir = directory / "bin"
+                binary_dir.mkdir()
+                for name, content in executables.items():
+                    path = binary_dir / name
+                    path.write_text(content, encoding="utf-8", newline="\n")
+                    path.chmod(0o755)
+            script = directory / "installer-mode.sh"
+            script.write_text(INSTALLER_LIBRARY + "\n" + body, encoding="utf-8", newline="\n")
+            result = subprocess.run([SHELL, str(script)], capture_output=True, cwd=directory)
+            output = (result.stdout + result.stderr).decode("utf-8", errors="replace")
+            self.assertEqual(result.returncode, 0, output)
+            return output, directory
+
+    def test_no_argument_uses_safe_update_for_existing_install(self):
+        output, _ = self.run_shell(
+            "need_root() { :; }\ncheck_debian() { :; }\n"
+            "installation_complete() { return 0; }\n"
+            "safe_update() { echo __safe_update__; }\n"
+            "full_install() { echo __unexpected_install__; return 1; }\nmain\n"
+        )
+        self.assertIn("__safe_update__", output)
+        self.assertNotIn("__unexpected_install__", output)
+
+    def test_no_argument_installs_when_no_installation_exists(self):
+        output, _ = self.run_shell(
+            "need_root() { :; }\ncheck_debian() { :; }\n"
+            "installation_complete() { return 1; }\ninstallation_present() { return 1; }\n"
+            "safe_update() { echo __unexpected_update__; return 1; }\n"
+            "full_install() { [ \"$1\" = install ]; echo __fresh_install__; }\nmain\n"
+        )
+        self.assertIn("__fresh_install__", output)
+        self.assertNotIn("__unexpected_update__", output)
+
+    def test_installed_dependencies_skip_apt(self):
+        executables = {
+            "dpkg-query": "#!/bin/sh\nprintf 'install ok installed\\n'\n",
+            "apt-get": "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CALLS\"\n",
+        }
+        self.run_shell(
+            "PATH=./bin:$PATH\nCALLS=./apt-calls\nexport PATH CALLS\n"
+            "install_dependencies\n[ ! -e \"$CALLS\" ]\n",
+            executables,
+        )
 
 
 @unittest.skipUnless(SHELL, "Set VVR_TEST_SHELL to a POSIX shell to test menu settings")
