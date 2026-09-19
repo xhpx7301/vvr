@@ -19,6 +19,7 @@ DEFAULT_SNI="www.sony.com"
 DEFAULT_BASE_OUTBOUND_MODE="ipv4"
 DEFAULT_INBOUND_MODE="ipv4"
 DEFAULT_HAPPY_EYEBALLS_DELAY_MS="100"
+DEFAULT_INSTALLER_URL="https://raw.githubusercontent.com/xhpx7301/vvr/main/install-xray-reality-ipv4-ipv6-alpine-64mb.sh"
 FINGERPRINT="chrome"
 SPIDERX="%2F"
 TMP_DIR=""
@@ -370,13 +371,6 @@ prompt_base_outbound_mode() {
   done
 }
 
-prompt_default_youtube_rule() {
-  echo
-  printf '默认添加“YouTube 走 IPv6”规则？[Y/n]: '
-  read -r ANSWER
-  case "${ANSWER}" in n|N|no|NO) DEFAULT_YOUTUBE_RULE=0 ;; *) DEFAULT_YOUTUBE_RULE=1 ;; esac
-}
-
 confirm_inputs() {
   echo
   echo "安装参数确认："
@@ -385,11 +379,7 @@ confirm_inputs() {
   echo "  节点名称：${TAG}"
   echo "  节点入站：${INBOUND_MODE}"
   echo "  基础出站：$(outbound_mode_label "${BASE_OUTBOUND_MODE}")"
-  if [ "${DEFAULT_YOUTUBE_RULE}" -eq 1 ]; then
-    echo "  初始规则：YouTube 走 IPv6"
-  else
-    echo "  初始规则：无"
-  fi
+  echo "  初始规则：无"
   echo
   printf '确认继续安装？[Y/n]: '
   read -r ANSWER
@@ -475,11 +465,7 @@ ensure_routes_file() {
 
 initialize_routes_file() {
   mkdir -p "${CONFIG_DIR}"
-  if [ "${DEFAULT_YOUTUBE_RULE}" -eq 1 ]; then
-    printf '%s\n' 'ipv6|geosite|youtube' > "${ROUTES_FILE}"
-  else
-    : > "${ROUTES_FILE}"
-  fi
+  : > "${ROUTES_FILE}"
   chmod 0600 "${ROUTES_FILE}"
 }
 
@@ -662,9 +648,35 @@ start_service() {
   ok "Xray 服务已启动。"
 }
 
+valid_manager_source() {
+  [ -f "$1" ] && sh -n "$1" >/dev/null 2>&1 && grep -Fq 'manager_main() {' "$1"
+}
+
+fetch_manager_source() {
+  FETCH_TARGET="$1"
+  INSTALLER_URL="${VVR_INSTALLER_URL:-${DEFAULT_INSTALLER_URL}}"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fL --retry 3 "${INSTALLER_URL}" -o "${FETCH_TARGET}"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -O "${FETCH_TARGET}" "${INSTALLER_URL}"
+  else
+    return 1
+  fi
+}
+
 install_manager() {
-  SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
-  [ -f "${SCRIPT_PATH}" ] || fail "无法定位当前安装脚本。"
+  SCRIPT_NAME="${0##*/}"
+  case "$0" in */*) SCRIPT_PARENT="${0%/*}" ;; *) SCRIPT_PARENT="." ;; esac
+  SCRIPT_DIR="$(cd "${SCRIPT_PARENT}" 2>/dev/null && pwd || true)"
+  SCRIPT_PATH=""
+  [ -z "${SCRIPT_DIR}" ] || SCRIPT_PATH="${SCRIPT_DIR}/${SCRIPT_NAME}"
+  if ! valid_manager_source "${SCRIPT_PATH}"; then
+    SCRIPT_PATH="${TMP_DIR}/vvr-manager-source.sh"
+    info "当前安装方式没有可复用的脚本文件，正在获取 vvr 管理程序..."
+    if ! fetch_manager_source "${SCRIPT_PATH}" || ! valid_manager_source "${SCRIPT_PATH}"; then
+      fail "无法获取有效的 vvr 管理程序；可通过 VVR_INSTALLER_URL 指定脚本地址。"
+    fi
+  fi
   install -m 0755 "${SCRIPT_PATH}" "${MANAGER_BIN}"
 }
 
@@ -1086,7 +1098,6 @@ installer_main() {
   HAPPY_EYEBALLS_DELAY_MS="${DEFAULT_HAPPY_EYEBALLS_DELAY_MS}"
   prompt_inbound_mode
   prompt_base_outbound_mode
-  prompt_default_youtube_rule
   confirm_inputs
 
   handle_existing_install
