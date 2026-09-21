@@ -329,6 +329,40 @@ prompt_tag() {
   done
 }
 
+prompt_initial_inbound_mode() {
+  while :; do
+    echo
+    echo "初始客户端入站地址族："
+    echo "  1. IPv4：$(ipv4_display)（监听 0.0.0.0）"
+    echo "  2. IPv6：$(ipv6_display)（监听 ::）"
+    printf '请选择 [1]: '
+    read -r INPUT
+    case "${INPUT:-1}" in
+      1)
+        if [ -z "${SERVER_IPV4}" ]; then
+          warn "当前检测不到 IPv4；初始 IPv4 客户端链接可能无法连接。"
+          printf '仍要继续吗？[y/N]: '
+          read -r ANSWER
+          case "${ANSWER}" in y|Y|yes|YES) ;; *) continue ;; esac
+        fi
+        INITIAL_INBOUND_MODE="ipv4"
+        return
+        ;;
+      2)
+        if [ -z "${SERVER_IPV6}" ]; then
+          warn "当前检测不到 IPv6；初始 IPv6 客户端链接可能无法连接。"
+          printf '仍要继续吗？[y/N]: '
+          read -r ANSWER
+          case "${ANSWER}" in y|Y|yes|YES) ;; *) continue ;; esac
+        fi
+        INITIAL_INBOUND_MODE="ipv6"
+        return
+        ;;
+      *) echo "无效选择，请输入 1 或 2。" ;;
+    esac
+  done
+}
+
 outbound_mode_label() {
   case "$1" in
     ipv4) printf '%s' '仅 IPv4' ;;
@@ -414,11 +448,12 @@ prompt_base_outbound_mode() {
 confirm_inputs() {
   echo
   echo "安装参数确认："
-  echo "  IPv4 入站：0.0.0.0:${IPV4_PORT}"
-  echo "  IPv6 入站：[::]:${IPV6_PORT}"
+  case "${INITIAL_INBOUND_MODE}" in
+    ipv4) echo "  初始入站：IPv4（0.0.0.0:${IPV4_PORT}）" ;;
+    ipv6) echo "  初始入站：IPv6（[::]:${IPV6_PORT}）" ;;
+  esac
   echo "  SNI：${SNI}"
-  echo "  初始 IPv4 客户端：${IPV4_CLIENT_NAME}"
-  echo "  初始 IPv6 客户端：${IPV6_CLIENT_NAME}"
+  echo "  初始客户端：${INITIAL_CLIENT_NAME}"
   echo "  基础出站：$(outbound_mode_label "${BASE_OUTBOUND_MODE}")"
   echo "  初始规则：无"
   echo
@@ -546,12 +581,13 @@ ensure_clients_file() {
 
 initialize_clients_file() {
   mkdir -p "${CONFIG_DIR}"
-  {
-    printf 'ipv4|%s|%s\n' "${IPV4_UUID}" "${IPV4_CLIENT_NAME}"
-    printf 'ipv6|%s|%s\n' "${IPV6_UUID}" "${IPV6_CLIENT_NAME}"
-  } > "${CLIENTS_FILE}"
+  case "${INITIAL_INBOUND_MODE}" in
+    ipv4) printf 'ipv4|%s|%s\n' "${INITIAL_UUID}" "${INITIAL_CLIENT_NAME}" > "${CLIENTS_FILE}" ;;
+    ipv6) printf 'ipv6|%s|%s\n' "${INITIAL_UUID}" "${INITIAL_CLIENT_NAME}" > "${CLIENTS_FILE}" ;;
+    *) : > "${CLIENTS_FILE}" ;;
+  esac
   chmod 0600 "${CLIENTS_FILE}"
-  info "已创建初始 IPv4 与 IPv6 客户端。"
+  info "已创建初始 ${INITIAL_INBOUND_MODE} 客户端。"
 }
 
 client_count() {
@@ -630,6 +666,27 @@ write_config() {
     esac
   done < "${CLIENTS_FILE}"
 
+  INBOUND_JSON=""
+  INBOUND_SEPARATOR=""
+  if [ -n "${IPV4_PORT}" ] && [ -n "${IPV4_CLIENTS}" ]; then
+    INBOUND_JSON="${INBOUND_JSON}${INBOUND_SEPARATOR}{
+      \"listen\": \"0.0.0.0\", \"port\": ${IPV4_PORT}, \"protocol\": \"vless\", \"tag\": \"vless-in-ipv4\",
+      \"settings\": {\"clients\": [${IPV4_CLIENTS}], \"decryption\": \"none\"},
+      \"streamSettings\": {\"network\": \"tcp\", \"security\": \"reality\", \"realitySettings\": {\"show\": false, \"dest\": \"${DEST}\", \"xver\": 0, \"serverNames\": [\"${SNI}\"], \"privateKey\": \"${PRIVATE_KEY}\", \"shortIds\": [\"${SHORT_ID}\"]}},
+      \"sniffing\": {\"enabled\": true, \"destOverride\": [\"http\", \"tls\", \"quic\"], \"routeOnly\": true}
+    }"
+    INBOUND_SEPARATOR=","
+  fi
+  if [ -n "${IPV6_PORT}" ] && [ -n "${IPV6_CLIENTS}" ]; then
+    INBOUND_JSON="${INBOUND_JSON}${INBOUND_SEPARATOR}{
+      \"listen\": \"::\", \"port\": ${IPV6_PORT}, \"protocol\": \"vless\", \"tag\": \"vless-in-ipv6\",
+      \"settings\": {\"clients\": [${IPV6_CLIENTS}], \"decryption\": \"none\"},
+      \"streamSettings\": {\"network\": \"tcp\", \"security\": \"reality\", \"realitySettings\": {\"show\": false, \"dest\": \"${DEST}\", \"xver\": 0, \"serverNames\": [\"${SNI}\"], \"privateKey\": \"${PRIVATE_KEY}\", \"shortIds\": [\"${SHORT_ID}\"]}},
+      \"sniffing\": {\"enabled\": true, \"destOverride\": [\"http\", \"tls\", \"quic\"], \"routeOnly\": true}
+    }"
+  fi
+  [ -n "${INBOUND_JSON}" ] || fail "至少需要一个入站客户端。"
+
   mkdir -p "${CONFIG_DIR}"
   cat > "${CONFIG_FILE}" <<CONFIG
 {
@@ -638,62 +695,7 @@ write_config() {
     "servers": ["localhost", "1.1.1.1"],
     "queryStrategy": "UseIP"
   },
-  "inbounds": [
-    {
-      "listen": "0.0.0.0",
-      "port": ${IPV4_PORT},
-      "protocol": "vless",
-      "tag": "vless-in-ipv4",
-      "settings": {
-        "clients": [${IPV4_CLIENTS}],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "network": "tcp",
-        "security": "reality",
-        "realitySettings": {
-          "show": false,
-          "dest": "${DEST}",
-          "xver": 0,
-          "serverNames": ["${SNI}"],
-          "privateKey": "${PRIVATE_KEY}",
-          "shortIds": ["${SHORT_ID}"]
-        }
-      },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": ["http", "tls", "quic"],
-        "routeOnly": true
-      }
-    },
-    {
-      "listen": "::",
-      "port": ${IPV6_PORT},
-      "protocol": "vless",
-      "tag": "vless-in-ipv6",
-      "settings": {
-        "clients": [${IPV6_CLIENTS}],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "network": "tcp",
-        "security": "reality",
-        "realitySettings": {
-          "show": false,
-          "dest": "${DEST}",
-          "xver": 0,
-          "serverNames": ["${SNI}"],
-          "privateKey": "${PRIVATE_KEY}",
-          "shortIds": ["${SHORT_ID}"]
-        }
-      },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": ["http", "tls", "quic"],
-        "routeOnly": true
-      }
-    }
-  ],
+  "inbounds": [${INBOUND_JSON}],
   "outbounds": [
     {"protocol": "freedom", "tag": "direct-ipv4", "settings": {"domainStrategy": "UseIPv4"}},
     {"protocol": "freedom", "tag": "direct-ipv6", "settings": {"domainStrategy": "UseIPv6"}},
@@ -751,8 +753,8 @@ load_state() {
   # shellcheck disable=SC1090
   . "${META_FILE}"
   DEST="${DEST:-${SNI}:443}"
-  IPV4_PORT="${IPV4_PORT:-${DEFAULT_IPV4_PORT}}"
-  IPV6_PORT="${IPV6_PORT:-${DEFAULT_IPV6_PORT}}"
+  IPV4_PORT="${IPV4_PORT-${DEFAULT_IPV4_PORT}}"
+  IPV6_PORT="${IPV6_PORT-${DEFAULT_IPV6_PORT}}"
   BASE_OUTBOUND_MODE="${BASE_OUTBOUND_MODE:-${DEFAULT_BASE_OUTBOUND_MODE}}"
   HAPPY_EYEBALLS_DELAY_MS="${HAPPY_EYEBALLS_DELAY_MS:-${DEFAULT_HAPPY_EYEBALLS_DELAY_MS}}"
   SERVER_IPV4="${SERVER_IPV4:-}"
@@ -855,8 +857,16 @@ show_clients() {
   load_state
   echo
   echo "节点配置："
-  echo "  IPv4 入站：0.0.0.0:${IPV4_PORT}（公网地址：$(ipv4_display)）"
-  echo "  IPv6 入站：[::]:${IPV6_PORT}（公网地址：$(ipv6_display)）"
+  if [ "$(client_count ipv4)" -gt 0 ]; then
+    echo "  IPv4 入站：0.0.0.0:${IPV4_PORT}（公网地址：$(ipv4_display)）"
+  else
+    echo "  IPv4 入站：未启用（添加首个 IPv4 客户端时设置端口）"
+  fi
+  if [ "$(client_count ipv6)" -gt 0 ]; then
+    echo "  IPv6 入站：[::]:${IPV6_PORT}（公网地址：$(ipv6_display)）"
+  else
+    echo "  IPv6 入站：未启用（添加首个 IPv6 客户端时设置端口）"
+  fi
   echo "  SNI：${SNI}"
   echo "  基础出站：$(outbound_mode_label "${BASE_OUTBOUND_MODE}")"
   echo
@@ -964,24 +974,31 @@ refresh_network() {
 
 modify_ports() {
   load_state
-  OLD_IPV4_PORT="${IPV4_PORT}"
-  OLD_IPV6_PORT="${IPV6_PORT}"
   while :; do
-    prompt_port_value "IPv4 " "${IPV4_PORT}"
-    IPV4_PORT="${SELECTED_PORT}"
-    if check_port_available "${IPV4_PORT}" "${OLD_IPV4_PORT}"; then break; fi
-    echo "端口 ${IPV4_PORT} 已被占用，请重新输入。"
-    IPV4_PORT="${OLD_IPV4_PORT}"
+    echo "  1. 修改 IPv4 入站端口$( [ "$(client_count ipv4)" -gt 0 ] && printf '（当前 %s）' "${IPV4_PORT}" || printf '（未启用）' )"
+    echo "  2. 修改 IPv6 入站端口$( [ "$(client_count ipv6)" -gt 0 ] && printf '（当前 %s）' "${IPV6_PORT}" || printf '（未启用）' )"
+    echo "  0. 返回"
+    printf '请选择: '
+    read -r INPUT
+    case "${INPUT}" in
+      1) PORT_FAMILY="ipv4"; CURRENT_PORT="${IPV4_PORT:-${DEFAULT_IPV4_PORT}}"; OTHER_PORT="${IPV6_PORT}" ;;
+      2) PORT_FAMILY="ipv6"; CURRENT_PORT="${IPV6_PORT:-${DEFAULT_IPV6_PORT}}"; OTHER_PORT="${IPV4_PORT}" ;;
+      0) return ;;
+      *) echo "无效选择。"; continue ;;
+    esac
+    [ "$(client_count "${PORT_FAMILY}")" -gt 0 ] || { echo "该入站尚未启用，请先添加一个 ${PORT_FAMILY} 客户端。"; continue; }
+    OLD_PORT="${CURRENT_PORT}"
+    while :; do
+      prompt_port_value "${PORT_FAMILY} " "${CURRENT_PORT}"
+      NEW_PORT="${SELECTED_PORT}"
+      [ -z "${OTHER_PORT}" ] || [ "${NEW_PORT}" != "${OTHER_PORT}" ] || { echo "两个入站不能使用相同端口。"; continue; }
+      if check_port_available "${NEW_PORT}" "${OLD_PORT}"; then break; fi
+      echo "端口 ${NEW_PORT} 已被占用，请重新输入。"
+    done
+    case "${PORT_FAMILY}" in ipv4) IPV4_PORT="${NEW_PORT}" ;; ipv6) IPV6_PORT="${NEW_PORT}" ;; esac
+    apply_config && show_clients
+    return
   done
-  while :; do
-    prompt_port_value "IPv6 " "${IPV6_PORT}"
-    IPV6_PORT="${SELECTED_PORT}"
-    [ "${IPV6_PORT}" != "${IPV4_PORT}" ] || { echo "IPv4 与 IPv6 入站请使用不同端口。"; IPV6_PORT="${OLD_IPV6_PORT}"; continue; }
-    if check_port_available "${IPV6_PORT}" "${OLD_IPV6_PORT}"; then break; fi
-    echo "端口 ${IPV6_PORT} 已被占用，请重新输入。"
-    IPV6_PORT="${OLD_IPV6_PORT}"
-  done
-  apply_config && show_clients
 }
 
 modify_sni() {
@@ -992,8 +1009,8 @@ modify_sni() {
 
 choose_client_family() {
   while :; do
-    echo "  1. IPv4 入站（端口 ${IPV4_PORT}）"
-    echo "  2. IPv6 入站（端口 ${IPV6_PORT}）"
+    echo "  1. IPv4 入站$( [ -n "${IPV4_PORT}" ] && printf '（端口 %s）' "${IPV4_PORT}" || printf '（未启用）' )"
+    echo "  2. IPv6 入站$( [ -n "${IPV6_PORT}" ] && printf '（端口 %s）' "${IPV6_PORT}" || printf '（未启用）' )"
     echo "  0. 返回"
     printf '选择客户端所属入站: '
     read -r INPUT
@@ -1009,6 +1026,20 @@ choose_client_family() {
 add_client() {
   load_state
   choose_client_family || return
+  if [ "$(client_count "${CLIENT_FAMILY}")" -eq 0 ]; then
+    case "${CLIENT_FAMILY}" in
+      ipv4) NEW_DEFAULT_PORT="${DEFAULT_IPV4_PORT}"; OTHER_PORT="${IPV6_PORT}" ;;
+      ipv6) NEW_DEFAULT_PORT="${DEFAULT_IPV6_PORT}"; OTHER_PORT="${IPV4_PORT}" ;;
+    esac
+    while :; do
+      prompt_port_value "${CLIENT_FAMILY} " "${NEW_DEFAULT_PORT}"
+      NEW_PORT="${SELECTED_PORT}"
+      [ -z "${OTHER_PORT}" ] || [ "${NEW_PORT}" != "${OTHER_PORT}" ] || { echo "两个入站不能使用相同端口。"; continue; }
+      if check_port_available "${NEW_PORT}" ""; then break; fi
+      echo "端口 ${NEW_PORT} 已被占用，请重新输入。"
+    done
+    case "${CLIENT_FAMILY}" in ipv4) IPV4_PORT="${NEW_PORT}" ;; ipv6) IPV6_PORT="${NEW_PORT}" ;; esac
+  fi
   while :; do
     prompt_tag ""
     CLIENT_NAME="${TAG}"
@@ -1040,6 +1071,7 @@ delete_client() {
     printf '%-4s  %-6s %s\n' "${NUMBER}" "${CLIENT_FAMILY}" "${CLIENT_NAME}"
   done < "${CLIENTS_FILE}"
   [ "${NUMBER}" -gt 0 ] || { echo "（暂无客户端）"; return; }
+  [ "${NUMBER}" -gt 1 ] || { warn "至少需要保留一个客户端，不能删除最后一个客户端。"; return; }
   while :; do
     printf '输入要删除的客户端编号（0 取消）: '
     read -r INPUT
@@ -1342,12 +1374,13 @@ print_result() {
   echo "客户端文件：${CLIENTS_FILE}"
   echo "规则文件：${ROUTES_FILE}"
   echo "管理菜单：vvr"
-  echo "IPv4 入站：0.0.0.0:${IPV4_PORT}"
-  echo "IPv6 入站：[::]:${IPV6_PORT}"
   echo "基础出站：$(outbound_mode_label "${BASE_OUTBOUND_MODE}")"
   show_clients
-  echo "请在防火墙和云安全组中放行 TCP ${IPV4_PORT} 和 ${IPV6_PORT}。"
-  echo "IPv6 客户端所在网络必须支持 IPv6。"
+  case "${INITIAL_INBOUND_MODE}" in
+    ipv4) echo "请在防火墙和云安全组中放行 TCP ${IPV4_PORT}。" ;;
+    ipv6) echo "请在防火墙和云安全组中放行 TCP ${IPV6_PORT}；客户端网络必须支持 IPv6。" ;;
+  esac
+  echo "以后可通过 vvr 添加另一地址族的客户端并设置其入站端口。"
 }
 
 installer_main() {
@@ -1365,19 +1398,16 @@ installer_main() {
   prepare_tmp
   detect_network
 
-  prompt_port_value "IPv4 " "${DEFAULT_IPV4_PORT}"
-  IPV4_PORT="${SELECTED_PORT}"
-  while :; do
-    prompt_port_value "IPv6 " "${DEFAULT_IPV6_PORT}"
-    IPV6_PORT="${SELECTED_PORT}"
-    [ "${IPV6_PORT}" != "${IPV4_PORT}" ] && break
-    echo "IPv4 与 IPv6 入站请使用不同端口。"
-  done
+  prompt_port_value "" "${DEFAULT_IPV4_PORT}"
+  INITIAL_PORT="${SELECTED_PORT}"
   prompt_sni "${DEFAULT_SNI}"
-  prompt_tag "vvr-ipv4"
-  IPV4_CLIENT_NAME="${TAG}"
-  prompt_tag "vvr-ipv6"
-  IPV6_CLIENT_NAME="${TAG}"
+  prompt_tag ""
+  INITIAL_CLIENT_NAME="${TAG}"
+  prompt_initial_inbound_mode
+  case "${INITIAL_INBOUND_MODE}" in
+    ipv4) IPV4_PORT="${INITIAL_PORT}"; IPV6_PORT="" ;;
+    ipv6) IPV4_PORT=""; IPV6_PORT="${INITIAL_PORT}" ;;
+  esac
   BASE_OUTBOUND_MODE="${DEFAULT_BASE_OUTBOUND_MODE}"
   HAPPY_EYEBALLS_DELAY_MS="${DEFAULT_HAPPY_EYEBALLS_DELAY_MS}"
   [ -n "${SERVER_IPV4}" ] || warn "未检测到公网 IPv4，IPv4 链接将使用占位地址。"
@@ -1388,13 +1418,10 @@ installer_main() {
   handle_existing_install
   download_xray
   prepare_for_replacement
-  check_port_available "${IPV4_PORT}" "" || fail "端口 ${IPV4_PORT} 已被占用。"
-  check_port_available "${IPV6_PORT}" "" || fail "端口 ${IPV6_PORT} 已被占用。"
+  check_port_available "${INITIAL_PORT}" "" || fail "端口 ${INITIAL_PORT} 已被占用。"
   install_xray
   generate_uuid
-  IPV4_UUID="${UUID}"
-  generate_uuid
-  IPV6_UUID="${UUID}"
+  INITIAL_UUID="${UUID}"
   generate_reality_values
   initialize_routes_file
   initialize_clients_file
