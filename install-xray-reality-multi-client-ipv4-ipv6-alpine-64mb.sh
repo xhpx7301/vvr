@@ -361,14 +361,45 @@ generate_ss_password() {
 }
 
 prompt_ss_initial() {
-  SS_BIND="0.0.0.0"
+  prompt_ss_family
   prompt_port_value "Shadowsocks " "${DEFAULT_SS_PORT}"
   SS_PORT="${SELECTED_PORT}"
   SS_NETWORK="${DEFAULT_SS_NETWORK}"
   SS_METHOD="${DEFAULT_SS_METHOD}"
   SS_NAME="${DEFAULT_SS_NAME}"
   generate_ss_password
-  if [ -n "${SERVER_IPV4}" ]; then SS_SERVER_HOST="${SERVER_IPV4}"; else SS_SERVER_HOST=""; fi
+}
+
+prompt_ss_family() {
+  while :; do
+    echo
+    echo "Shadowsocks 入站地址族："
+    echo "  1. IPv4：$(ipv4_display)（监听 0.0.0.0）"
+    echo "  2. IPv6：$(ipv6_display)（监听 ::）"
+    printf '请选择 [1]: '
+    read -r INPUT
+    case "${INPUT:-1}" in
+      1)
+        if [ -z "${SERVER_IPV4}" ]; then
+          warn "当前检测不到公网 IPv4；SS IPv4 链接将使用占位地址。"
+        fi
+        SS_FAMILY="ipv4"
+        SS_BIND="0.0.0.0"
+        SS_SERVER_HOST="${SERVER_IPV4:-}"
+        return
+        ;;
+      2)
+        if [ -z "${SERVER_IPV6}" ]; then
+          warn "当前检测不到公网 IPv6；SS IPv6 链接将使用占位地址。"
+        fi
+        SS_FAMILY="ipv6"
+        SS_BIND="::"
+        SS_SERVER_HOST="${SERVER_IPV6:-}"
+        return
+        ;;
+      *) echo "无效选择，请输入 1 或 2。" ;;
+    esac
+  done
 }
 
 prompt_initial_inbound_mode() {
@@ -809,6 +840,7 @@ FINGERPRINT='${FINGERPRINT}'
 SPIDERX='${SPIDERX}'
 SS_PORT='${SS_PORT:-}'
 SS_BIND='${SS_BIND:-}'
+SS_FAMILY='${SS_FAMILY:-}'
 SS_NETWORK='${SS_NETWORK:-${DEFAULT_SS_NETWORK}}'
 SS_METHOD='${SS_METHOD:-${DEFAULT_SS_METHOD}}'
 SS_PASSWORD='${SS_PASSWORD:-}'
@@ -822,7 +854,7 @@ load_state() {
   [ -f "${META_FILE}" ] || fail "未找到节点信息文件：${META_FILE}。请重新运行安装脚本。"
   unset IPV4_PORT IPV6_PORT SNI DEST PRIVATE_KEY PUBLIC_KEY SHORT_ID
   unset SERVER_IPV4 SERVER_IPV6 BASE_OUTBOUND_MODE HAPPY_EYEBALLS_DELAY_MS FINGERPRINT SPIDERX
-  unset SS_PORT SS_BIND SS_NETWORK SS_METHOD SS_PASSWORD SS_NAME SS_SERVER_HOST
+  unset SS_PORT SS_BIND SS_FAMILY SS_NETWORK SS_METHOD SS_PASSWORD SS_NAME SS_SERVER_HOST
   # shellcheck disable=SC1090
   . "${META_FILE}"
   IPV4_PORT="${IPV4_PORT:-}"
@@ -842,6 +874,10 @@ load_state() {
   SPIDERX="${SPIDERX:-%2F}"
   SS_PORT="${SS_PORT:-}"
   SS_BIND="${SS_BIND:-0.0.0.0}"
+  SS_FAMILY="${SS_FAMILY:-}"
+  if [ -z "${SS_FAMILY}" ]; then
+    case "${SS_BIND}" in ::) SS_FAMILY="ipv6" ;; *) SS_FAMILY="ipv4" ;; esac
+  fi
   SS_NETWORK="${SS_NETWORK:-${DEFAULT_SS_NETWORK}}"
   SS_METHOD="${SS_METHOD:-${DEFAULT_SS_METHOD}}"
   SS_PASSWORD="${SS_PASSWORD:-}"
@@ -1068,46 +1104,76 @@ make_ss_uri() {
 
 show_clients() {
   load_state
+
+  VLESS_ENABLED="0"
+  if [ -n "${PRIVATE_KEY}" ] && [ -n "${PUBLIC_KEY}" ] && [ -n "${SHORT_ID}" ]; then
+    VLESS_ENABLED="1"
+  fi
+
   echo
-  echo "节点配置："
-  if [ -n "${SS_PORT}" ] && [ -n "${SS_PASSWORD}" ]; then
-    echo "  Shadowsocks：${SS_BIND}:${SS_PORT}（${SS_METHOD}，${SS_NETWORK}）"
-    make_ss_uri
-    echo "  Shadowsocks 密码：${SS_PASSWORD}"
+  echo "=============================="
+  echo " VLESS + REALITY 节点配置"
+  echo "=============================="
+  if [ "${VLESS_ENABLED}" = "1" ]; then
+    echo "状态：已启用"
+    if [ "$(client_count ipv4)" -gt 0 ]; then
+      echo "IPv4 入站：0.0.0.0:${IPV4_PORT}（公网地址：$(ipv4_display)）"
+    else
+      echo "IPv4 入站：未启用"
+    fi
+    if [ "$(client_count ipv6)" -gt 0 ]; then
+      echo "IPv6 入站：[::]:${IPV6_PORT}（公网地址：$(ipv6_display)）"
+    else
+      echo "IPv6 入站：未启用"
+    fi
+    echo "SNI：${SNI}"
+    echo "基础出站：$(outbound_mode_label "${BASE_OUTBOUND_MODE}")"
+    echo
+    echo "VLESS 客户端链接："
+    NUMBER=0
+    while IFS='|' read -r CLIENT_FAMILY CLIENT_UUID CLIENT_NAME; do
+      [ -n "${CLIENT_UUID}" ] || continue
+      NUMBER=$((NUMBER + 1))
+      make_uri "${CLIENT_FAMILY}" "${CLIENT_UUID}" "${CLIENT_NAME}"
+      printf '%s. [%s] %s\n%s\n\n' "${NUMBER}" "${CLIENT_FAMILY}" "${CLIENT_NAME}" "${URI}"
+    done < "${CLIENTS_FILE}"
+    [ "${NUMBER}" -gt 0 ] || echo "（暂无 VLESS 客户端）"
   else
-    echo "  Shadowsocks：未启用"
+    echo "状态：未启用"
   fi
-  if [ "$(client_count ipv4)" -gt 0 ]; then
-    echo "  IPv4 入站：0.0.0.0:${IPV4_PORT}（公网地址：$(ipv4_display)）"
-  else
-    echo "  IPv4 入站：未启用（添加首个 IPv4 客户端时设置端口）"
-  fi
-  if [ "$(client_count ipv6)" -gt 0 ]; then
-    echo "  IPv6 入站：[::]:${IPV6_PORT}（公网地址：$(ipv6_display)）"
-  else
-    echo "  IPv6 入站：未启用（添加首个 IPv6 客户端时设置端口）"
-  fi
-  if [ -n "${PRIVATE_KEY}" ]; then
-    echo "  SNI：${SNI}"
-  else
-    echo "  SNI：不适用（Shadowsocks 不使用 SNI）"
-  fi
-  echo "  基础出站：$(outbound_mode_label "${BASE_OUTBOUND_MODE}")"
+
   echo
-  echo "客户端链接："
-  NUMBER=0
+  echo "=============================="
+  echo " Shadowsocks 节点配置"
+  echo "=============================="
   if [ -n "${SS_PORT}" ] && [ -n "${SS_PASSWORD}" ]; then
-    NUMBER=$((NUMBER + 1))
+    echo "状态：已启用"
+    case "${SS_FAMILY}" in
+      ipv6)
+        echo "入站地址族：IPv6"
+        echo "监听地址：[::]:${SS_PORT}"
+        if [ -n "${SS_SERVER_HOST}" ]; then
+          echo "公网地址：[${SS_SERVER_HOST}]"
+        else
+          echo "公网地址：[你的服务器IPv6地址]"
+        fi
+        ;;
+      *)
+        echo "入站地址族：IPv4"
+        echo "监听地址：0.0.0.0:${SS_PORT}"
+        echo "公网地址：${SS_SERVER_HOST:-你的服务器IPv4地址}"
+        ;;
+    esac
+    echo "加密方法：${SS_METHOD}"
+    echo "网络：${SS_NETWORK}"
+    echo "密码：${SS_PASSWORD}"
     make_ss_uri
-    printf '%s. [shadowsocks] %s\n%s\n\n' "${NUMBER}" "${SS_NAME}" "${SS_URI}"
+    echo
+    echo "Shadowsocks 客户端链接："
+    printf '1. [%s] %s\n%s\n' "${SS_FAMILY}" "${SS_NAME}" "${SS_URI}"
+  else
+    echo "状态：未启用"
   fi
-  while IFS='|' read -r CLIENT_FAMILY CLIENT_UUID CLIENT_NAME; do
-    [ -n "${CLIENT_UUID}" ] || continue
-    NUMBER=$((NUMBER + 1))
-    make_uri "${CLIENT_FAMILY}" "${CLIENT_UUID}" "${CLIENT_NAME}"
-    printf '%s. [%s] %s\n%s\n\n' "${NUMBER}" "${CLIENT_FAMILY}" "${CLIENT_NAME}" "${URI}"
-  done < "${CLIENTS_FILE}"
-  [ "${NUMBER}" -gt 0 ] || echo "（暂无客户端）"
 }
 
 restore_pending_routes() {
@@ -1281,11 +1347,11 @@ add_shadowsocks_inbound() {
   if [ -n "${SS_PORT}" ] && [ -n "${SS_PASSWORD}" ]; then
     echo "Shadowsocks 入站已启用：${SS_BIND}:${SS_PORT}"; return
   fi
+  prompt_ss_family
   prompt_port_value "Shadowsocks " "${DEFAULT_SS_PORT}"
   SS_PORT="${SELECTED_PORT}"
   [ "${SS_PORT}" != "${IPV4_PORT:-}" ] && [ "${SS_PORT}" != "${IPV6_PORT:-}" ] || fail "Shadowsocks 端口不能与 VLESS 入站重复。"
   check_port_available "${SS_PORT}" "" || fail "端口 ${SS_PORT} 已被占用。"
-  SS_BIND="0.0.0.0"
   while :; do
     echo "Shadowsocks 网络："
     echo "  1. TCP（低延迟默认）"
@@ -1300,7 +1366,6 @@ add_shadowsocks_inbound() {
   done
   SS_METHOD="${DEFAULT_SS_METHOD}"
   SS_NAME="${DEFAULT_SS_NAME}"
-  SS_SERVER_HOST="${SERVER_IPV4:-}"
   generate_ss_password
   apply_config && show_clients
 }
@@ -1315,7 +1380,7 @@ remove_shadowsocks_inbound() {
   printf '确认删除 Shadowsocks 入站？[y/N]: '
   read -r ANSWER
   case "${ANSWER}" in y|Y|yes|YES) ;; *) return ;; esac
-  SS_PORT=""; SS_PASSWORD=""; SS_SERVER_HOST=""
+  SS_PORT=""; SS_PASSWORD=""; SS_SERVER_HOST=""; SS_FAMILY=""; SS_BIND=""
   apply_config || true
 }
 
@@ -1753,6 +1818,7 @@ installer_main() {
 
   SS_PORT=""
   SS_BIND=""
+  SS_FAMILY=""
   SS_NETWORK="${DEFAULT_SS_NETWORK}"
   SS_METHOD="${DEFAULT_SS_METHOD}"
   SS_PASSWORD=""
