@@ -26,7 +26,12 @@ DEFAULT_SS_PORT="8388"
 DEFAULT_SS_NETWORK="tcp"
 DEFAULT_SS_METHOD="2022-blake3-aes-128-gcm"
 DEFAULT_SS_NAME="ss-landing"
-DEFAULT_INSTALLER_URL="https://raw.githubusercontent.com/xhpx7301/vvr/main/install-xray-reality-multi-client-ipv4-ipv6-alpine-64mb.sh"
+GITHUB_REPO="${VVR_GITHUB_REPO:-xhpx7301/vvr}"
+GITHUB_BRANCH="${VVR_GITHUB_BRANCH:-main}"
+GITHUB_RAW_BASE="https://raw.githubusercontent.com/${GITHUB_REPO}/${GITHUB_BRANCH}"
+GITHUB_API_URL="https://api.github.com/repos/${GITHUB_REPO}"
+DEFAULT_INSTALLER_URL="${GITHUB_RAW_BASE}/install-xray-reality-multi-client-ipv4-ipv6-alpine-64mb.sh"
+VVR_UPDATE_DIR="${VVR_UPDATE_DIR:-/root/vvr-updates}"
 FINGERPRINT="chrome"
 SPIDERX="%2F"
 TMP_DIR=""
@@ -900,6 +905,125 @@ fetch_manager_source() {
   fi
 }
 
+fetch_url() {
+  FETCH_URL="$1"
+  FETCH_TARGET="$2"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fL --retry 3 --connect-timeout 10 --max-time 120 "${FETCH_URL}" -o "${FETCH_TARGET}"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -O "${FETCH_TARGET}" "${FETCH_URL}"
+  else
+    return 1
+  fi
+}
+
+valid_update_source() {
+  valid_manager_source "$1" && grep -Fq 'manage_shadowsocks() {' "$1" && grep -Fq 'make_ss_uri() {' "$1"
+}
+
+show_github_update_status() {
+  info "检查 GitHub 更新：${GITHUB_REPO} (${GITHUB_BRANCH})"
+  API_OUTPUT=""
+  if command -v curl >/dev/null 2>&1; then
+    API_OUTPUT="$(curl -fsSL --connect-timeout 10 --max-time 20 -H 'Accept: application/vnd.github+json' "${GITHUB_API_URL}/commits/${GITHUB_BRANCH}" 2>/dev/null || true)"
+  elif command -v wget >/dev/null 2>&1; then
+    API_OUTPUT="$(wget -qO- "${GITHUB_API_URL}/commits/${GITHUB_BRANCH}" 2>/dev/null || true)"
+  fi
+  COMMIT_SHA="$(printf '%s\n' "${API_OUTPUT}" | sed -n 's/^[[:space:]]*"sha":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+  COMMIT_DATE="$(printf '%s\n' "${API_OUTPUT}" | sed -n 's/^[[:space:]]*"date":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+  COMMIT_MESSAGE="$(printf '%s\n' "${API_OUTPUT}" | sed -n 's/^[[:space:]]*"message":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+  if [ -n "${COMMIT_SHA}" ]; then
+    echo "远程提交：${COMMIT_SHA}"
+    [ -z "${COMMIT_DATE}" ] || echo "提交时间：${COMMIT_DATE}"
+    [ -z "${COMMIT_MESSAGE}" ] || echo "提交说明：${COMMIT_MESSAGE}"
+    echo "源码地址：https://github.com/${GITHUB_REPO}/tree/${GITHUB_BRANCH}"
+  else
+    warn "无法读取 GitHub 最新提交信息，请检查网络或稍后重试。"
+    return 1
+  fi
+}
+
+update_manager_script() {
+  UPDATE_TMP="$(mktemp /tmp/vvr-manager-update.XXXXXX)"
+  if ! fetch_manager_source "${UPDATE_TMP}"; then
+    rm -f "${UPDATE_TMP}"
+    warn "下载最新管理脚本失败。"
+    return 1
+  fi
+  if ! valid_update_source "${UPDATE_TMP}"; then
+    rm -f "${UPDATE_TMP}"
+    warn "远程文件校验失败，未替换当前管理脚本。"
+    return 1
+  fi
+  install -m 0755 "${UPDATE_TMP}" "${MANAGER_BIN}"
+  rm -f "${UPDATE_TMP}"
+  ok "vvr 管理脚本已更新。"
+  echo "更新源：${VVR_INSTALLER_URL:-${DEFAULT_INSTALLER_URL}}"
+  echo "将重新载入管理面板。"
+  exec "${MANAGER_BIN}" --manage
+}
+
+download_latest_installer() {
+  mkdir -p "${VVR_UPDATE_DIR}"
+  UPDATE_TARGET="${VVR_UPDATE_DIR}/install-xray-reality-multi-client-ipv4-ipv6-alpine-64mb.sh"
+  UPDATE_TMP="${UPDATE_TARGET}.tmp.$$"
+  if ! fetch_url "${DEFAULT_INSTALLER_URL}" "${UPDATE_TMP}" || ! valid_update_source "${UPDATE_TMP}"; then
+    rm -f "${UPDATE_TMP}"
+    warn "最新 64MB Alpine 安装脚本下载或校验失败。"
+    return 1
+  fi
+  chmod 0755 "${UPDATE_TMP}"
+  mv -f "${UPDATE_TMP}" "${UPDATE_TARGET}"
+  ok "最新 64MB Alpine 安装脚本已保存：${UPDATE_TARGET}"
+}
+
+download_repository_bundle() {
+  mkdir -p "${VVR_UPDATE_DIR}"
+  BUNDLE_TMP="$(mktemp /tmp/vvr-source-bundle.XXXXXX.zip)"
+  BUNDLE_TARGET="${VVR_UPDATE_DIR}/vvr-${GITHUB_BRANCH}-$(date +%Y%m%d%H%M%S)"
+  BUNDLE_URL="https://github.com/${GITHUB_REPO}/archive/refs/heads/${GITHUB_BRANCH}.zip"
+  if ! fetch_url "${BUNDLE_URL}" "${BUNDLE_TMP}"; then
+    rm -f "${BUNDLE_TMP}"
+    warn "项目源码包下载失败。"
+    return 1
+  fi
+  mkdir -p "${BUNDLE_TARGET}"
+  if ! unzip -q "${BUNDLE_TMP}" -d "${BUNDLE_TARGET}"; then
+    rm -f "${BUNDLE_TMP}"
+    warn "项目源码包解压失败，文件已保留在：${BUNDLE_TARGET}"
+    return 1
+  fi
+  rm -f "${BUNDLE_TMP}"
+  ok "项目最新源码包已保存：${BUNDLE_TARGET}"
+}
+
+manage_updates() {
+  while :; do
+    echo
+    echo "=============================="
+    echo " GitHub 脚本更新与获取"
+    echo "=============================="
+    echo "项目：${GITHUB_REPO}"
+    echo " 1. 检查 GitHub 最新提交"
+    echo " 2. 更新当前 vvr 管理脚本并重新载入"
+    echo " 3. 下载最新 64MB Alpine 安装脚本"
+    echo " 4. 下载项目完整源码包"
+    echo " 0. 返回主菜单"
+    printf '请选择操作: '
+    read -r CHOICE
+    case "${CHOICE}" in
+      1) show_github_update_status || true ;;
+      2) update_manager_script ;;
+      3) download_latest_installer ;;
+      4) download_repository_bundle ;;
+      0) return ;;
+      *) echo "无效选择。" ;;
+    esac
+    echo
+    case "${CHOICE}" in 2) ;; *) printf '按回车继续...'; read -r _ ;; esac
+  done
+}
+
 install_manager() {
   SCRIPT_NAME="${0##*/}"
   case "$0" in */*) SCRIPT_PARENT="${0%/*}" ;; *) SCRIPT_PARENT="." ;; esac
@@ -950,7 +1074,6 @@ show_clients() {
     echo "  Shadowsocks：${SS_BIND}:${SS_PORT}（${SS_METHOD}，${SS_NETWORK}）"
     make_ss_uri
     echo "  Shadowsocks 密码：${SS_PASSWORD}"
-    echo "  Shadowsocks 链接：${SS_URI}"
   else
     echo "  Shadowsocks：未启用"
   fi
@@ -964,11 +1087,20 @@ show_clients() {
   else
     echo "  IPv6 入站：未启用（添加首个 IPv6 客户端时设置端口）"
   fi
-  echo "  SNI：${SNI}"
+  if [ -n "${PRIVATE_KEY}" ]; then
+    echo "  SNI：${SNI}"
+  else
+    echo "  SNI：不适用（Shadowsocks 不使用 SNI）"
+  fi
   echo "  基础出站：$(outbound_mode_label "${BASE_OUTBOUND_MODE}")"
   echo
   echo "客户端链接："
   NUMBER=0
+  if [ -n "${SS_PORT}" ] && [ -n "${SS_PASSWORD}" ]; then
+    NUMBER=$((NUMBER + 1))
+    make_ss_uri
+    printf '%s. [shadowsocks] %s\n%s\n\n' "${NUMBER}" "${SS_NAME}" "${SS_URI}"
+  fi
   while IFS='|' read -r CLIENT_FAMILY CLIENT_UUID CLIENT_NAME; do
     [ -n "${CLIENT_UUID}" ] || continue
     NUMBER=$((NUMBER + 1))
@@ -1505,6 +1637,7 @@ manager_menu() {
   echo "11. 查看日志"
   echo "12. 重置 REALITY 密钥"
   echo "13. 卸载并清理环境"
+  echo "14. GitHub 脚本更新与获取"
   echo " 0. 退出"
   printf '请选择操作: '
 }
@@ -1572,11 +1705,12 @@ manager_main() {
       11) show_logs ;;
       12) regenerate_reality ;;
       13) uninstall_xray ;;
+      14) manage_updates ;;
       0) exit 0 ;;
       *) echo "无效选择。" ;;
     esac
     case "${CHOICE}" in
-      2|3|4|7) ;;
+      2|3|4|7|14) ;;
       *) echo; printf '按回车返回菜单...'; read -r _ ;;
     esac
   done
