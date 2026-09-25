@@ -1,8 +1,8 @@
 #!/usr/bin/env sh
 set -eu
 
-# Low-memory Alpine installer and multi-client manager for VLESS + REALITY.
-# IPv4 and IPv6 use independent inbounds and client lists.
+# Low-memory Alpine installer and multi-client manager for VLESS + REALITY
+# plus an optional Shadowsocks inbound in the same Xray process.
 
 XRAY_DIR="/usr/local/xray"
 XRAY_BIN="${XRAY_DIR}/xray"
@@ -11,6 +11,7 @@ CONFIG_FILE="${CONFIG_DIR}/config.json"
 META_FILE="${CONFIG_DIR}/vless-reality-ip.env"
 ROUTES_FILE="${CONFIG_DIR}/vvr-routing.rules"
 CLIENTS_FILE="${CONFIG_DIR}/vvr-clients.db"
+SS_INBOUND_TAG="shadowsocks-in"
 SERVICE_FILE="/etc/init.d/xray"
 LOG_FILE="/var/log/xray.log"
 ERR_LOG_FILE="/var/log/xray.err"
@@ -21,6 +22,10 @@ DEFAULT_IPV6_PORT="8443"
 DEFAULT_SNI="www.sony.com"
 DEFAULT_BASE_OUTBOUND_MODE="ipv4"
 DEFAULT_HAPPY_EYEBALLS_DELAY_MS="100"
+DEFAULT_SS_PORT="8388"
+DEFAULT_SS_NETWORK="tcp"
+DEFAULT_SS_METHOD="2022-blake3-aes-128-gcm"
+DEFAULT_SS_NAME="ss-landing"
 DEFAULT_INSTALLER_URL="https://raw.githubusercontent.com/xhpx7301/vvr/main/install-xray-reality-multi-client-ipv4-ipv6-alpine-64mb.sh"
 FINGERPRINT="chrome"
 SPIDERX="%2F"
@@ -329,6 +334,38 @@ prompt_tag() {
   done
 }
 
+prompt_initial_protocol() {
+  while :; do
+    echo
+    echo "首次安装协议："
+    echo "  1. VLESS + REALITY（直连）"
+    echo "  2. Shadowsocks（落地）"
+    printf '请选择 [1]: '
+    read -r INPUT
+    case "${INPUT:-1}" in
+      1) INITIAL_PROTOCOL="vless"; return ;;
+      2) INITIAL_PROTOCOL="shadowsocks"; return ;;
+      *) echo "无效选择，请输入 1 或 2。" ;;
+    esac
+  done
+}
+
+generate_ss_password() {
+  SS_PASSWORD="$(openssl rand -base64 16 | tr -d '\r\n')"
+  [ -n "${SS_PASSWORD}" ] || fail "生成 Shadowsocks 密码失败。"
+}
+
+prompt_ss_initial() {
+  SS_BIND="0.0.0.0"
+  prompt_port_value "Shadowsocks " "${DEFAULT_SS_PORT}"
+  SS_PORT="${SELECTED_PORT}"
+  SS_NETWORK="${DEFAULT_SS_NETWORK}"
+  SS_METHOD="${DEFAULT_SS_METHOD}"
+  SS_NAME="${DEFAULT_SS_NAME}"
+  generate_ss_password
+  if [ -n "${SERVER_IPV4}" ]; then SS_SERVER_HOST="${SERVER_IPV4}"; else SS_SERVER_HOST=""; fi
+}
+
 prompt_initial_inbound_mode() {
   while :; do
     echo
@@ -448,12 +485,19 @@ prompt_base_outbound_mode() {
 confirm_inputs() {
   echo
   echo "安装参数确认："
-  case "${INITIAL_INBOUND_MODE}" in
-    ipv4) echo "  初始入站：IPv4（0.0.0.0:${IPV4_PORT}）" ;;
-    ipv6) echo "  初始入站：IPv6（[::]:${IPV6_PORT}）" ;;
-  esac
-  echo "  SNI：${SNI}"
-  echo "  初始客户端：${INITIAL_CLIENT_NAME}"
+  if [ "${INITIAL_PROTOCOL}" = "vless" ]; then
+    case "${INITIAL_INBOUND_MODE}" in
+      ipv4) echo "  初始入站：VLESS + REALITY IPv4（0.0.0.0:${IPV4_PORT}）" ;;
+      ipv6) echo "  初始入站：VLESS + REALITY IPv6（[::]:${IPV6_PORT}）" ;;
+    esac
+    echo "  SNI：${SNI}"
+    echo "  初始客户端：${INITIAL_CLIENT_NAME}"
+  else
+    echo "  初始入站：Shadowsocks（${SS_BIND}:${SS_PORT}）"
+    echo "  加密方法：${SS_METHOD}"
+    echo "  网络：${SS_NETWORK}"
+    echo "  密码：${SS_PASSWORD}"
+  fi
   echo "  基础出站：$(outbound_mode_label "${BASE_OUTBOUND_MODE}")"
   echo "  初始规则：无"
   echo
@@ -587,7 +631,7 @@ initialize_clients_file() {
     *) : > "${CLIENTS_FILE}" ;;
   esac
   chmod 0600 "${CLIENTS_FILE}"
-  info "已创建初始 ${INITIAL_INBOUND_MODE} 客户端。"
+  if [ -n "${INITIAL_INBOUND_MODE}" ]; then info "已创建初始 ${INITIAL_INBOUND_MODE} 客户端。"; fi
 }
 
 client_count() {
@@ -668,6 +712,7 @@ write_config() {
 
   INBOUND_JSON=""
   INBOUND_SEPARATOR=""
+  INBOUND_TAGS=""
   if [ -n "${IPV4_PORT}" ] && [ -n "${IPV4_CLIENTS}" ]; then
     INBOUND_JSON="${INBOUND_JSON}${INBOUND_SEPARATOR}{
       \"listen\": \"0.0.0.0\", \"port\": ${IPV4_PORT}, \"protocol\": \"vless\", \"tag\": \"vless-in-ipv4\",
@@ -675,7 +720,8 @@ write_config() {
       \"streamSettings\": {\"network\": \"tcp\", \"security\": \"reality\", \"realitySettings\": {\"show\": false, \"dest\": \"${DEST}\", \"xver\": 0, \"serverNames\": [\"${SNI}\"], \"privateKey\": \"${PRIVATE_KEY}\", \"shortIds\": [\"${SHORT_ID}\"]}},
       \"sniffing\": {\"enabled\": true, \"destOverride\": [\"http\", \"tls\", \"quic\"], \"routeOnly\": true}
     }"
-    INBOUND_SEPARATOR=","
+    INBOUND_SEPARATOR=','
+    INBOUND_TAGS="\"vless-in-ipv4\""
   fi
   if [ -n "${IPV6_PORT}" ] && [ -n "${IPV6_CLIENTS}" ]; then
     INBOUND_JSON="${INBOUND_JSON}${INBOUND_SEPARATOR}{
@@ -684,6 +730,18 @@ write_config() {
       \"streamSettings\": {\"network\": \"tcp\", \"security\": \"reality\", \"realitySettings\": {\"show\": false, \"dest\": \"${DEST}\", \"xver\": 0, \"serverNames\": [\"${SNI}\"], \"privateKey\": \"${PRIVATE_KEY}\", \"shortIds\": [\"${SHORT_ID}\"]}},
       \"sniffing\": {\"enabled\": true, \"destOverride\": [\"http\", \"tls\", \"quic\"], \"routeOnly\": true}
     }"
+    if [ -n "${INBOUND_TAGS}" ]; then INBOUND_TAGS="${INBOUND_TAGS},"; fi
+    INBOUND_TAGS="${INBOUND_TAGS}\"vless-in-ipv6\""
+    INBOUND_SEPARATOR=','
+  fi
+  if [ -n "${SS_PORT}" ] && [ -n "${SS_PASSWORD}" ]; then
+    INBOUND_JSON="${INBOUND_JSON}${INBOUND_SEPARATOR}{
+      \"listen\": \"${SS_BIND}\", \"port\": ${SS_PORT}, \"protocol\": \"shadowsocks\", \"tag\": \"${SS_INBOUND_TAG}\",
+      \"settings\": {\"method\": \"${SS_METHOD}\", \"password\": \"${SS_PASSWORD}\", \"network\": \"${SS_NETWORK}\"},
+      \"sniffing\": {\"enabled\": false}
+    }"
+    if [ -n "${INBOUND_TAGS}" ]; then INBOUND_TAGS="${INBOUND_TAGS},"; fi
+    INBOUND_TAGS="${INBOUND_TAGS}\"${SS_INBOUND_TAG}\""
   fi
   [ -n "${INBOUND_JSON}" ] || fail "至少需要一个入站客户端。"
 
@@ -709,7 +767,7 @@ write_config() {
     "domainStrategy": "AsIs",
     "rules": [
       {"type": "field", "protocol": ["bittorrent"], "outboundTag": "block"},
-${ROUTING_RULES}      {"type": "field", "inboundTag": ["vless-in-ipv4", "vless-in-ipv6"], "outboundTag": "${BASE_OUTBOUND_TAG}"}
+${ROUTING_RULES}      {"type": "field", "inboundTag": [${INBOUND_TAGS}], "outboundTag": "${BASE_OUTBOUND_TAG}"}
     ]
   }
 }
@@ -744,15 +802,31 @@ BASE_OUTBOUND_MODE='${BASE_OUTBOUND_MODE}'
 HAPPY_EYEBALLS_DELAY_MS='${HAPPY_EYEBALLS_DELAY_MS}'
 FINGERPRINT='${FINGERPRINT}'
 SPIDERX='${SPIDERX}'
+SS_PORT='${SS_PORT:-}'
+SS_BIND='${SS_BIND:-}'
+SS_NETWORK='${SS_NETWORK:-${DEFAULT_SS_NETWORK}}'
+SS_METHOD='${SS_METHOD:-${DEFAULT_SS_METHOD}}'
+SS_PASSWORD='${SS_PASSWORD:-}'
+SS_NAME='${SS_NAME:-${DEFAULT_SS_NAME}}'
+SS_SERVER_HOST='${SS_SERVER_HOST:-}'
 STATE
   chmod 0600 "${META_FILE}"
 }
 
 load_state() {
   [ -f "${META_FILE}" ] || fail "未找到节点信息文件：${META_FILE}。请重新运行安装脚本。"
+  unset IPV4_PORT IPV6_PORT SNI DEST PRIVATE_KEY PUBLIC_KEY SHORT_ID
+  unset SERVER_IPV4 SERVER_IPV6 BASE_OUTBOUND_MODE HAPPY_EYEBALLS_DELAY_MS FINGERPRINT SPIDERX
+  unset SS_PORT SS_BIND SS_NETWORK SS_METHOD SS_PASSWORD SS_NAME SS_SERVER_HOST
   # shellcheck disable=SC1090
   . "${META_FILE}"
+  IPV4_PORT="${IPV4_PORT:-}"
+  IPV6_PORT="${IPV6_PORT:-}"
+  SNI="${SNI:-${DEFAULT_SNI}}"
   DEST="${DEST:-${SNI}:443}"
+  PRIVATE_KEY="${PRIVATE_KEY:-}"
+  PUBLIC_KEY="${PUBLIC_KEY:-}"
+  SHORT_ID="${SHORT_ID:-}"
   IPV4_PORT="${IPV4_PORT-${DEFAULT_IPV4_PORT}}"
   IPV6_PORT="${IPV6_PORT-${DEFAULT_IPV6_PORT}}"
   BASE_OUTBOUND_MODE="${BASE_OUTBOUND_MODE:-${DEFAULT_BASE_OUTBOUND_MODE}}"
@@ -761,6 +835,13 @@ load_state() {
   SERVER_IPV6="${SERVER_IPV6:-}"
   FINGERPRINT="${FINGERPRINT:-chrome}"
   SPIDERX="${SPIDERX:-%2F}"
+  SS_PORT="${SS_PORT:-}"
+  SS_BIND="${SS_BIND:-0.0.0.0}"
+  SS_NETWORK="${SS_NETWORK:-${DEFAULT_SS_NETWORK}}"
+  SS_METHOD="${SS_METHOD:-${DEFAULT_SS_METHOD}}"
+  SS_PASSWORD="${SS_PASSWORD:-}"
+  SS_NAME="${SS_NAME:-${DEFAULT_SS_NAME}}"
+  SS_SERVER_HOST="${SS_SERVER_HOST:-${SERVER_IPV4:-}}"
   ensure_clients_file
 }
 
@@ -853,10 +934,26 @@ make_uri() {
   URI="vless://${URI_UUID}@${URI_HOST}:${URI_PORT}?type=tcp&encryption=none&security=reality&pbk=${PUBLIC_KEY}&fp=${FINGERPRINT}&sni=${SNI}&sid=${SHORT_ID}&spx=${SPIDERX}&flow=xtls-rprx-vision#${URI_NAME}"
 }
 
+make_ss_uri() {
+  SS_URI_HOST="${SS_SERVER_HOST:-${SERVER_IPV4:-}}"
+  [ -n "${SS_URI_HOST}" ] || SS_URI_HOST="你的服务器地址"
+  case "${SS_URI_HOST}" in *:*) SS_URI_HOST="[${SS_URI_HOST}]" ;; esac
+  SS_URI_USER="$(printf '%s' "${SS_METHOD}:${SS_PASSWORD}" | openssl base64 -A | tr '+/' '-_' | tr -d '=')"
+  SS_URI="ss://${SS_URI_USER}@${SS_URI_HOST}:${SS_PORT}#${SS_NAME}"
+}
+
 show_clients() {
   load_state
   echo
   echo "节点配置："
+  if [ -n "${SS_PORT}" ] && [ -n "${SS_PASSWORD}" ]; then
+    echo "  Shadowsocks：${SS_BIND}:${SS_PORT}（${SS_METHOD}，${SS_NETWORK}）"
+    make_ss_uri
+    echo "  Shadowsocks 密码：${SS_PASSWORD}"
+    echo "  Shadowsocks 链接：${SS_URI}"
+  else
+    echo "  Shadowsocks：未启用"
+  fi
   if [ "$(client_count ipv4)" -gt 0 ]; then
     echo "  IPv4 入站：0.0.0.0:${IPV4_PORT}（公网地址：$(ipv4_display)）"
   else
@@ -974,6 +1071,7 @@ refresh_network() {
 
 modify_ports() {
   load_state
+  [ -n "${PRIVATE_KEY}" ] || { echo "VLESS + REALITY 尚未启用，请先在协议管理中创建。"; return; }
   while :; do
     echo "  1. 修改 IPv4 入站端口$( [ "$(client_count ipv4)" -gt 0 ] && printf '（当前 %s）' "${IPV4_PORT}" || printf '（未启用）' )"
     echo "  2. 修改 IPv6 入站端口$( [ "$(client_count ipv6)" -gt 0 ] && printf '（当前 %s）' "${IPV6_PORT}" || printf '（未启用）' )"
@@ -1003,6 +1101,7 @@ modify_ports() {
 
 modify_sni() {
   load_state
+  [ -n "${PRIVATE_KEY}" ] || { echo "VLESS + REALITY 尚未启用，请先在协议管理中创建。"; return; }
   prompt_sni "${SNI}"
   apply_config && show_clients
 }
@@ -1023,10 +1122,78 @@ choose_client_family() {
   done
 }
 
+enable_vless_inbound() {
+  load_state
+  if [ -n "${PRIVATE_KEY}" ] && [ -n "${PUBLIC_KEY}" ] && [ -n "${SHORT_ID}" ]; then
+    return 0
+  fi
+  echo "首次创建 VLESS + REALITY 入站。"
+  detect_network
+  prompt_sni "${DEFAULT_SNI}"
+  prompt_initial_inbound_mode
+  prompt_port_value "VLESS " "${DEFAULT_IPV4_PORT}"
+  VLESS_PORT="${SELECTED_PORT}"
+  case "${INITIAL_INBOUND_MODE}" in
+    ipv4) IPV4_PORT="${VLESS_PORT}"; IPV6_PORT="" ;;
+    ipv6) IPV4_PORT=""; IPV6_PORT="${VLESS_PORT}" ;;
+  esac
+  [ "${VLESS_PORT}" != "${SS_PORT:-}" ] || { warn "VLESS 端口不能与 Shadowsocks 入站重复。"; return 1; }
+  check_port_available "${VLESS_PORT}" "" || { warn "端口 ${VLESS_PORT} 已被占用。"; return 1; }
+  generate_reality_values
+  VLESS_ENABLED="1"
+  ensure_clients_file
+}
+
+add_shadowsocks_inbound() {
+  load_state
+  if [ -n "${SS_PORT}" ] && [ -n "${SS_PASSWORD}" ]; then
+    echo "Shadowsocks 入站已启用：${SS_BIND}:${SS_PORT}"; return
+  fi
+  prompt_port_value "Shadowsocks " "${DEFAULT_SS_PORT}"
+  SS_PORT="${SELECTED_PORT}"
+  [ "${SS_PORT}" != "${IPV4_PORT:-}" ] && [ "${SS_PORT}" != "${IPV6_PORT:-}" ] || fail "Shadowsocks 端口不能与 VLESS 入站重复。"
+  check_port_available "${SS_PORT}" "" || fail "端口 ${SS_PORT} 已被占用。"
+  SS_BIND="0.0.0.0"
+  while :; do
+    echo "Shadowsocks 网络："
+    echo "  1. TCP（低延迟默认）"
+    echo "  2. TCP + UDP"
+    printf '请选择 [1]: '
+    read -r INPUT
+    case "${INPUT:-1}" in
+      1) SS_NETWORK="tcp"; break ;;
+      2) SS_NETWORK="tcp,udp"; break ;;
+      *) echo "无效选择，请输入 1 或 2。" ;;
+    esac
+  done
+  SS_METHOD="${DEFAULT_SS_METHOD}"
+  SS_NAME="${DEFAULT_SS_NAME}"
+  SS_SERVER_HOST="${SERVER_IPV4:-}"
+  generate_ss_password
+  apply_config && show_clients
+}
+
+remove_shadowsocks_inbound() {
+  load_state
+  [ -n "${SS_PORT}" ] && [ -n "${SS_PASSWORD}" ] || { echo "Shadowsocks 入站尚未启用。"; return; }
+  if [ -z "${PRIVATE_KEY}" ] || [ -z "${PUBLIC_KEY}" ] || [ -z "${SHORT_ID}" ]; then
+    warn "当前只有 Shadowsocks 入站，不能删除最后一个协议。请先创建 VLESS + REALITY。"
+    return
+  fi
+  printf '确认删除 Shadowsocks 入站？[y/N]: '
+  read -r ANSWER
+  case "${ANSWER}" in y|Y|yes|YES) ;; *) return ;; esac
+  SS_PORT=""; SS_PASSWORD=""; SS_SERVER_HOST=""
+  apply_config || true
+}
+
 add_client() {
   load_state
+  if [ -z "${PRIVATE_KEY}" ] || [ -z "${PUBLIC_KEY}" ] || [ -z "${SHORT_ID}" ]; then
+    enable_vless_inbound || return
+  fi
   choose_client_family || return
-  if [ "$(client_count "${CLIENT_FAMILY}")" -eq 0 ]; then
+  if [ "$(client_count "${CLIENT_FAMILY}")" -eq 0 ] && { { [ "${CLIENT_FAMILY}" = "ipv4" ] && [ -z "${IPV4_PORT}" ]; } || { [ "${CLIENT_FAMILY}" = "ipv6" ] && [ -z "${IPV6_PORT}" ]; }; }; then
     case "${CLIENT_FAMILY}" in
       ipv4) NEW_DEFAULT_PORT="${DEFAULT_IPV4_PORT}"; OTHER_PORT="${IPV6_PORT}" ;;
       ipv6) NEW_DEFAULT_PORT="${DEFAULT_IPV6_PORT}"; OTHER_PORT="${IPV4_PORT}" ;;
@@ -1289,6 +1456,7 @@ restart_xray() {
 
 regenerate_reality() {
   load_state
+  [ -n "${PRIVATE_KEY}" ] || { echo "VLESS + REALITY 尚未启用。"; return; }
   warn "将重新生成 REALITY 密钥和 shortId，所有现有客户端链接都需要更新。"
   printf '确认重置 REALITY 参数？[y/N]: '
   read -r ANSWER
@@ -1322,21 +1490,66 @@ manager_menu() {
   load_state
   clear 2>/dev/null || true
   echo "=============================="
-  echo " VLESS + REALITY 双入站多客户端管理"
+  echo " VLESS + REALITY + Shadowsocks 管理"
   echo "=============================="
   echo " 1. 查看全部客户端链接与配置"
   echo " 2. 管理客户端（添加/删除）"
-  echo " 3. 修改 REALITY SNI"
-  echo " 4. 修改 IPv4/IPv6 入站端口"
-  echo " 5. 管理 IPv4/IPv6 出站与域名规则"
-  echo " 6. 刷新公网 IPv4/IPv6 地址"
-  echo " 7. 重启 Xray"
-  echo " 8. 查看服务状态"
-  echo " 9. 查看日志"
-  echo "10. 重置 REALITY 密钥"
-  echo "11. 卸载并清理环境"
+  echo " 3. 创建/管理 Shadowsocks 入站"
+  echo " 4. 创建/管理 VLESS + REALITY 入站"
+  echo " 5. 修改 REALITY SNI"
+  echo " 6. 修改 IPv4/IPv6 入站端口"
+  echo " 7. 管理 IPv4/IPv6 出站与域名规则"
+  echo " 8. 刷新公网 IPv4/IPv6 地址"
+  echo " 9. 重启 Xray"
+  echo "10. 查看服务状态"
+  echo "11. 查看日志"
+  echo "12. 重置 REALITY 密钥"
+  echo "13. 卸载并清理环境"
   echo " 0. 退出"
   printf '请选择操作: '
+}
+
+manage_shadowsocks() {
+  load_state
+  while :; do
+    echo
+    echo "=============================="
+    echo " Shadowsocks 入站管理"
+    echo "=============================="
+    if [ -n "${SS_PORT}" ] && [ -n "${SS_PASSWORD}" ]; then
+      echo "当前：${SS_BIND}:${SS_PORT}（${SS_METHOD}，${SS_NETWORK}）"
+      echo " 1. 查看 Shadowsocks 链接"
+      echo " 2. 删除 Shadowsocks 入站"
+    else
+      echo "当前：未启用"
+      echo " 1. 创建 Shadowsocks 入站"
+    fi
+    echo " 0. 返回"
+    printf '请选择操作: '
+    read -r CHOICE
+    case "${CHOICE}" in
+      1)
+        if [ -n "${SS_PORT}" ] && [ -n "${SS_PASSWORD}" ]; then make_ss_uri; echo "${SS_URI}"; else add_shadowsocks_inbound; fi
+        ;;
+      2) remove_shadowsocks_inbound ;;
+      0) return ;;
+      *) echo "无效选择。" ;;
+    esac
+    echo; printf '按回车继续...'; read -r _
+  done
+}
+
+manage_vless() {
+  load_state
+  if [ -z "${PRIVATE_KEY}" ] || [ -z "${PUBLIC_KEY}" ] || [ -z "${SHORT_ID}" ]; then
+    enable_vless_inbound || return
+    prompt_tag ""
+    generate_uuid
+    INITIAL_UUID="${UUID}"
+    printf '%s|%s|%s\n' "${INITIAL_INBOUND_MODE}" "${INITIAL_UUID}" "${TAG}" >> "${CLIENTS_FILE}"
+    chmod 0600 "${CLIENTS_FILE}"
+  fi
+  apply_config && show_clients
 }
 
 manager_main() {
@@ -1348,20 +1561,22 @@ manager_main() {
     case "${CHOICE}" in
       1) show_clients ;;
       2) manage_clients ;;
-      3) modify_sni ;;
-      4) modify_ports ;;
-      5) manage_outbound ;;
-      6) refresh_network ;;
-      7) restart_xray ;;
-      8) rc-service xray status || true ;;
-      9) show_logs ;;
-      10) regenerate_reality ;;
-      11) uninstall_xray ;;
+      3) manage_shadowsocks ;;
+      4) manage_vless ;;
+      5) modify_sni ;;
+      6) modify_ports ;;
+      7) manage_outbound ;;
+      8) refresh_network ;;
+      9) restart_xray ;;
+      10) rc-service xray status || true ;;
+      11) show_logs ;;
+      12) regenerate_reality ;;
+      13) uninstall_xray ;;
       0) exit 0 ;;
       *) echo "无效选择。" ;;
     esac
     case "${CHOICE}" in
-      2|5) ;;
+      2|3|4|7) ;;
       *) echo; printf '按回车返回菜单...'; read -r _ ;;
     esac
   done
@@ -1369,18 +1584,22 @@ manager_main() {
 
 print_result() {
   echo
-  ok "Xray VLESS + REALITY IPv4/IPv6 双入站多客户端节点安装完成。"
+  ok "Xray 多协议入站安装完成。"
   echo "配置文件：${CONFIG_FILE}"
   echo "客户端文件：${CLIENTS_FILE}"
   echo "规则文件：${ROUTES_FILE}"
   echo "管理菜单：vvr"
   echo "基础出站：$(outbound_mode_label "${BASE_OUTBOUND_MODE}")"
   show_clients
-  case "${INITIAL_INBOUND_MODE}" in
-    ipv4) echo "请在防火墙和云安全组中放行 TCP ${IPV4_PORT}。" ;;
-    ipv6) echo "请在防火墙和云安全组中放行 TCP ${IPV6_PORT}；客户端网络必须支持 IPv6。" ;;
-  esac
-  echo "以后可通过 vvr 添加另一地址族的客户端并设置其入站端口。"
+  if [ -n "${INITIAL_INBOUND_MODE}" ]; then
+    case "${INITIAL_INBOUND_MODE}" in
+      ipv4) echo "请在防火墙和云安全组中放行 TCP ${IPV4_PORT}。" ;;
+      ipv6) echo "请在防火墙和云安全组中放行 TCP ${IPV6_PORT}；客户端网络必须支持 IPv6。" ;;
+    esac
+  else
+    echo "请在防火墙和云安全组中放行 ${SS_NETWORK} ${SS_PORT}。"
+  fi
+  echo "以后可通过 vvr 菜单创建另一种协议的入站。"
 }
 
 installer_main() {
@@ -1398,16 +1617,39 @@ installer_main() {
   prepare_tmp
   detect_network
 
-  prompt_port_value "" "${DEFAULT_IPV4_PORT}"
-  INITIAL_PORT="${SELECTED_PORT}"
-  prompt_sni "${DEFAULT_SNI}"
-  prompt_tag ""
-  INITIAL_CLIENT_NAME="${TAG}"
-  prompt_initial_inbound_mode
-  case "${INITIAL_INBOUND_MODE}" in
-    ipv4) IPV4_PORT="${INITIAL_PORT}"; IPV6_PORT="" ;;
-    ipv6) IPV4_PORT=""; IPV6_PORT="${INITIAL_PORT}" ;;
-  esac
+  SS_PORT=""
+  SS_BIND=""
+  SS_NETWORK="${DEFAULT_SS_NETWORK}"
+  SS_METHOD="${DEFAULT_SS_METHOD}"
+  SS_PASSWORD=""
+  SS_NAME="${DEFAULT_SS_NAME}"
+  SS_SERVER_HOST="${SERVER_IPV4:-}"
+  PRIVATE_KEY=""
+  PUBLIC_KEY=""
+  SHORT_ID=""
+  SNI=""
+  DEST=""
+  FINGERPRINT="chrome"
+  SPIDERX="%2F"
+  prompt_initial_protocol
+  if [ "${INITIAL_PROTOCOL}" = "vless" ]; then
+    prompt_port_value "" "${DEFAULT_IPV4_PORT}"
+    INITIAL_PORT="${SELECTED_PORT}"
+    prompt_sni "${DEFAULT_SNI}"
+    prompt_tag ""
+    INITIAL_CLIENT_NAME="${TAG}"
+    prompt_initial_inbound_mode
+    case "${INITIAL_INBOUND_MODE}" in
+      ipv4) IPV4_PORT="${INITIAL_PORT}"; IPV6_PORT="" ;;
+      ipv6) IPV4_PORT=""; IPV6_PORT="${INITIAL_PORT}" ;;
+    esac
+  else
+    prompt_ss_initial
+    INITIAL_PORT="${SS_PORT}"
+    INITIAL_INBOUND_MODE=""
+    IPV4_PORT=""
+    IPV6_PORT=""
+  fi
   BASE_OUTBOUND_MODE="${DEFAULT_BASE_OUTBOUND_MODE}"
   HAPPY_EYEBALLS_DELAY_MS="${DEFAULT_HAPPY_EYEBALLS_DELAY_MS}"
   [ -n "${SERVER_IPV4}" ] || warn "未检测到公网 IPv4，IPv4 链接将使用占位地址。"
@@ -1420,9 +1662,11 @@ installer_main() {
   prepare_for_replacement
   check_port_available "${INITIAL_PORT}" "" || fail "端口 ${INITIAL_PORT} 已被占用。"
   install_xray
-  generate_uuid
-  INITIAL_UUID="${UUID}"
-  generate_reality_values
+  if [ "${INITIAL_PROTOCOL}" = "vless" ]; then
+    generate_uuid
+    INITIAL_UUID="${UUID}"
+    generate_reality_values
+  fi
   initialize_routes_file
   initialize_clients_file
   write_config
