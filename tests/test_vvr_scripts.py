@@ -635,6 +635,20 @@ cat "${HY2_CLIENTS_FILE}"
         self.assertIn("55555555-5555-5555-5555-555555555555|legacy-x", output)
         self.assertIn("legacy-hy2-password|legacy-h", output)
 
+    def test_write_service_low_mem_gomemlimit_and_openrc_ulimit_clamp(self):
+        body = """
+INIT_TYPE="openrc"
+SERVICE_FILE="./xray.init"
+effective_memory_kb() { echo 65536; }
+ulimit() { echo 65535; }
+write_service
+cat "${SERVICE_FILE}"
+"""
+        output, _ = self.run_universal(body)
+        self.assertIn('rc_ulimit="-n 65535"', output)
+        self.assertIn('export GOGC="25"', output)
+        self.assertIn('export GOMEMLIMIT="32MiB"', output)
+
 
 if __name__ == "__main__":
     unittest.main()

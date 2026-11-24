@@ -337,12 +337,28 @@ service_follow_logs() {
 }
 
 write_service() {
+  MEM_SVC_KB="$(effective_memory_kb)"
+  SVC_GO_ENV_SD=""
+  SVC_GO_ENV_RC=""
+  if [ "${MEM_SVC_KB}" -gt 0 ] && [ "${MEM_SVC_KB}" -le "${LOW_MEM_THRESHOLD_KB}" ]; then
+    if [ "${MEM_SVC_KB}" -le 81920 ]; then
+      GO_MEM_LIMIT="32MiB"
+    else
+      GO_MEM_LIMIT="64MiB"
+    fi
+    SVC_GO_ENV_SD="Environment=GOGC=25
+Environment=GOMEMLIMIT=${GO_MEM_LIMIT}
+"
+    SVC_GO_ENV_RC="export GOGC=\"25\"
+export GOMEMLIMIT=\"${GO_MEM_LIMIT}\"
+"
+  fi
   case "${INIT_TYPE}" in
     systemd)
       info "写入 systemd 服务：${SERVICE_FILE}"
       cat > "${SERVICE_FILE}" <<SERVICE
 [Unit]
-Description=Xray VVR Multi-Protocol Service (VLESS REALITY & Shadowsocks)
+Description=Xray VVR Multi-Protocol Service (VLESS Vision/XHTTP REALITY, Hysteria 2 & Shadowsocks)
 Documentation=https://xtls.github.io/
 After=network-online.target
 Wants=network-online.target
@@ -350,7 +366,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 Environment=XRAY_LOCATION_ASSET=${XRAY_DIR}
-ExecStart=${XRAY_BIN} run -config ${CONFIG_FILE}
+${SVC_GO_ENV_SD}ExecStart=${XRAY_BIN} run -config ${CONFIG_FILE}
 Restart=on-failure
 RestartSec=5s
 LimitNOFILE=1048576
@@ -364,20 +380,33 @@ SERVICE
       ;;
     openrc)
       info "写入 OpenRC 服务：${SERVICE_FILE}"
+      RC_ULIMIT_LINE=""
+      HARD_NOFILE="$(ulimit -Hn 2>/dev/null || echo '')"
+      case "${HARD_NOFILE}" in
+        unlimited) RC_ULIMIT_LINE='rc_ulimit="-n 65536"' ;;
+        ''|*[!0-9]*) ;;
+        *)
+          if [ "${HARD_NOFILE}" -ge 65536 ]; then
+            RC_ULIMIT_LINE='rc_ulimit="-n 65536"'
+          elif [ "${HARD_NOFILE}" -gt 0 ]; then
+            RC_ULIMIT_LINE="rc_ulimit=\"-n ${HARD_NOFILE}\""
+          fi
+          ;;
+      esac
       cat > "${SERVICE_FILE}" <<SERVICE
 #!/sbin/openrc-run
 
 name="xray"
-description="Xray VVR Multi-Protocol Service (VLESS REALITY & Shadowsocks)"
+description="Xray VVR Multi-Protocol Service (VLESS Vision/XHTTP REALITY, Hysteria 2 & Shadowsocks)"
 command="${XRAY_BIN}"
 command_args="run -config ${CONFIG_FILE}"
 command_background="yes"
 pidfile="/run/xray.pid"
 output_log="${LOG_FILE}"
 error_log="${ERR_LOG_FILE}"
-rc_ulimit="-n 65536"
+${RC_ULIMIT_LINE}
 export XRAY_LOCATION_ASSET="${XRAY_DIR}"
-
+${SVC_GO_ENV_RC}
 depend() {
     need net
 }
@@ -409,6 +438,11 @@ effective_memory_kb() {
     fi
   done
   printf '%s' "${MEM_TOTAL_KB}"
+}
+
+is_low_mem_host() {
+  MEM_CHK_KB="$(effective_memory_kb)"
+  [ "${MEM_CHK_KB}" -gt 0 ] && [ "${MEM_CHK_KB}" -le "${LOW_MEM_THRESHOLD_KB}" ]
 }
 
 ensure_low_mem_swap() {
@@ -1689,12 +1723,12 @@ ${STATS_API_BLOCK}  "dns": {
   "inbounds": [${INBOUND_JSON}
   ],
   "outbounds": [
-    {"protocol": "freedom", "tag": "direct-ipv4", "settings": {"domainStrategy": "UseIPv4"}},
-    {"protocol": "freedom", "tag": "direct-ipv6", "settings": {"domainStrategy": "UseIPv6"}},
-    {"protocol": "freedom", "tag": "direct-ipv4v6", "settings": {"domainStrategy": "UseIPv4v6"}},
-    {"protocol": "freedom", "tag": "direct-ipv6v4", "settings": {"domainStrategy": "UseIPv6v4"}},
-    {"protocol": "freedom", "tag": "direct-happy-ipv4v6", "settings": {"domainStrategy": "UseIPv4v6"}, "streamSettings": {"sockopt": {"happyEyeballs": {"tryDelayMs": ${HAPPY_EYEBALLS_DELAY_MS}, "prioritizeIPv6": false}}}},
-    {"protocol": "freedom", "tag": "direct-happy-ipv6v4", "settings": {"domainStrategy": "UseIPv6v4"}, "streamSettings": {"sockopt": {"happyEyeballs": {"tryDelayMs": ${HAPPY_EYEBALLS_DELAY_MS}, "prioritizeIPv6": true}}}},
+    {"protocol": "freedom", "tag": "direct-ipv4", "streamSettings": {"sockopt": {"domainStrategy": "UseIPv4"}}},
+    {"protocol": "freedom", "tag": "direct-ipv6", "streamSettings": {"sockopt": {"domainStrategy": "UseIPv6"}}},
+    {"protocol": "freedom", "tag": "direct-ipv4v6", "streamSettings": {"sockopt": {"domainStrategy": "UseIPv4v6"}}},
+    {"protocol": "freedom", "tag": "direct-ipv6v4", "streamSettings": {"sockopt": {"domainStrategy": "UseIPv6v4"}}},
+    {"protocol": "freedom", "tag": "direct-happy-ipv4v6", "streamSettings": {"sockopt": {"domainStrategy": "UseIPv4v6", "happyEyeballs": {"tryDelayMs": ${HAPPY_EYEBALLS_DELAY_MS}, "prioritizeIPv6": false}}}},
+    {"protocol": "freedom", "tag": "direct-happy-ipv6v4", "streamSettings": {"sockopt": {"domainStrategy": "UseIPv6v4", "happyEyeballs": {"tryDelayMs": ${HAPPY_EYEBALLS_DELAY_MS}, "prioritizeIPv6": true}}}},
 ${CUSTOM_OUTBOUNDS_JSON}    {"protocol": "blackhole", "tag": "block"}
   ],
   "routing": {
@@ -4718,17 +4752,17 @@ test_url_routing() {
     R_TAG="test-rule-${RULE_NUM}"
     R_SOCKOPT=""
     case "${R_MODE}" in
-      ipv4) R_STRAT="UseIPv4"; TEST_RULE_OUTBOUNDS="${TEST_RULE_OUTBOUNDS}    {\"protocol\": \"freedom\", \"tag\": \"${R_TAG}\", \"settings\": {\"domainStrategy\": \"${R_STRAT}\"}},
+      ipv4) R_STRAT="UseIPv4"; TEST_RULE_OUTBOUNDS="${TEST_RULE_OUTBOUNDS}    {\"protocol\": \"freedom\", \"tag\": \"${R_TAG}\", \"streamSettings\": {\"sockopt\": {\"domainStrategy\": \"${R_STRAT}\"}}},
 " ;;
-      ipv6) R_STRAT="UseIPv6"; TEST_RULE_OUTBOUNDS="${TEST_RULE_OUTBOUNDS}    {\"protocol\": \"freedom\", \"tag\": \"${R_TAG}\", \"settings\": {\"domainStrategy\": \"${R_STRAT}\"}},
+      ipv6) R_STRAT="UseIPv6"; TEST_RULE_OUTBOUNDS="${TEST_RULE_OUTBOUNDS}    {\"protocol\": \"freedom\", \"tag\": \"${R_TAG}\", \"streamSettings\": {\"sockopt\": {\"domainStrategy\": \"${R_STRAT}\"}}},
 " ;;
-      ipv4v6) R_STRAT="UseIPv4v6"; TEST_RULE_OUTBOUNDS="${TEST_RULE_OUTBOUNDS}    {\"protocol\": \"freedom\", \"tag\": \"${R_TAG}\", \"settings\": {\"domainStrategy\": \"${R_STRAT}\"}},
+      ipv4v6) R_STRAT="UseIPv4v6"; TEST_RULE_OUTBOUNDS="${TEST_RULE_OUTBOUNDS}    {\"protocol\": \"freedom\", \"tag\": \"${R_TAG}\", \"streamSettings\": {\"sockopt\": {\"domainStrategy\": \"${R_STRAT}\"}}},
 " ;;
-      ipv6v4) R_STRAT="UseIPv6v4"; TEST_RULE_OUTBOUNDS="${TEST_RULE_OUTBOUNDS}    {\"protocol\": \"freedom\", \"tag\": \"${R_TAG}\", \"settings\": {\"domainStrategy\": \"${R_STRAT}\"}},
+      ipv6v4) R_STRAT="UseIPv6v4"; TEST_RULE_OUTBOUNDS="${TEST_RULE_OUTBOUNDS}    {\"protocol\": \"freedom\", \"tag\": \"${R_TAG}\", \"streamSettings\": {\"sockopt\": {\"domainStrategy\": \"${R_STRAT}\"}}},
 " ;;
-      happy4v6) R_STRAT="UseIPv4v6"; R_SOCKOPT=", \"streamSettings\": {\"sockopt\": {\"happyEyeballs\": {\"tryDelayMs\": ${HAPPY_EYEBALLS_DELAY_MS}, \"prioritizeIPv6\": false}}}"; TEST_RULE_OUTBOUNDS="${TEST_RULE_OUTBOUNDS}    {\"protocol\": \"freedom\", \"tag\": \"${R_TAG}\", \"settings\": {\"domainStrategy\": \"${R_STRAT}\"}${R_SOCKOPT}},
+      happy4v6) R_STRAT="UseIPv4v6"; TEST_RULE_OUTBOUNDS="${TEST_RULE_OUTBOUNDS}    {\"protocol\": \"freedom\", \"tag\": \"${R_TAG}\", \"streamSettings\": {\"sockopt\": {\"domainStrategy\": \"${R_STRAT}\", \"happyEyeballs\": {\"tryDelayMs\": ${HAPPY_EYEBALLS_DELAY_MS}, \"prioritizeIPv6\": false}}}},
 " ;;
-      happy6v4) R_STRAT="UseIPv6v4"; R_SOCKOPT=", \"streamSettings\": {\"sockopt\": {\"happyEyeballs\": {\"tryDelayMs\": ${HAPPY_EYEBALLS_DELAY_MS}, \"prioritizeIPv6\": true}}}"; TEST_RULE_OUTBOUNDS="${TEST_RULE_OUTBOUNDS}    {\"protocol\": \"freedom\", \"tag\": \"${R_TAG}\", \"settings\": {\"domainStrategy\": \"${R_STRAT}\"}${R_SOCKOPT}},
+      happy6v4) R_STRAT="UseIPv6v4"; TEST_RULE_OUTBOUNDS="${TEST_RULE_OUTBOUNDS}    {\"protocol\": \"freedom\", \"tag\": \"${R_TAG}\", \"streamSettings\": {\"sockopt\": {\"domainStrategy\": \"${R_STRAT}\", \"happyEyeballs\": {\"tryDelayMs\": ${HAPPY_EYEBALLS_DELAY_MS}, \"prioritizeIPv6\": true}}}},
 " ;;
       block)
         TEST_RULE_OUTBOUNDS="${TEST_RULE_OUTBOUNDS}    {\"protocol\": \"blackhole\", \"tag\": \"${R_TAG}\"},
@@ -4775,12 +4809,12 @@ test_url_routing() {
   "log": {"loglevel": "info", "access": "${TEST_ACC}", "error": "${TEST_ERR}"},
   "inbounds": [{"listen": "127.0.0.1", "port": ${TEST_PORT}, "protocol": "socks", "tag": "rule-test-in", "settings": {"udp": false}}],
   "outbounds": [
-    {"protocol": "freedom", "tag": "direct-ipv4", "settings": {"domainStrategy": "UseIPv4"}},
-    {"protocol": "freedom", "tag": "direct-ipv6", "settings": {"domainStrategy": "UseIPv6"}},
-    {"protocol": "freedom", "tag": "direct-ipv4v6", "settings": {"domainStrategy": "UseIPv4v6"}},
-    {"protocol": "freedom", "tag": "direct-ipv6v4", "settings": {"domainStrategy": "UseIPv6v4"}},
-    {"protocol": "freedom", "tag": "direct-happy-ipv4v6", "settings": {"domainStrategy": "UseIPv4v6"}, "streamSettings": {"sockopt": {"happyEyeballs": {"tryDelayMs": ${HAPPY_EYEBALLS_DELAY_MS}, "prioritizeIPv6": false}}}},
-    {"protocol": "freedom", "tag": "direct-happy-ipv6v4", "settings": {"domainStrategy": "UseIPv6v4"}, "streamSettings": {"sockopt": {"happyEyeballs": {"tryDelayMs": ${HAPPY_EYEBALLS_DELAY_MS}, "prioritizeIPv6": true}}}},
+    {"protocol": "freedom", "tag": "direct-ipv4", "streamSettings": {"sockopt": {"domainStrategy": "UseIPv4"}}},
+    {"protocol": "freedom", "tag": "direct-ipv6", "streamSettings": {"sockopt": {"domainStrategy": "UseIPv6"}}},
+    {"protocol": "freedom", "tag": "direct-ipv4v6", "streamSettings": {"sockopt": {"domainStrategy": "UseIPv4v6"}}},
+    {"protocol": "freedom", "tag": "direct-ipv6v4", "streamSettings": {"sockopt": {"domainStrategy": "UseIPv6v4"}}},
+    {"protocol": "freedom", "tag": "direct-happy-ipv4v6", "streamSettings": {"sockopt": {"domainStrategy": "UseIPv4v6", "happyEyeballs": {"tryDelayMs": ${HAPPY_EYEBALLS_DELAY_MS}, "prioritizeIPv6": false}}}},
+    {"protocol": "freedom", "tag": "direct-happy-ipv6v4", "streamSettings": {"sockopt": {"domainStrategy": "UseIPv6v4", "happyEyeballs": {"tryDelayMs": ${HAPPY_EYEBALLS_DELAY_MS}, "prioritizeIPv6": true}}}},
 ${CUSTOM_OUTBOUNDS_JSON}${TEST_RULE_OUTBOUNDS}    {"protocol": "blackhole", "tag": "block"}
   ],
   "routing": {
@@ -4956,17 +4990,26 @@ install_python3_dep() {
     return 0
   fi
   info "正在安装流量统计所需依赖（python3 + sqlite3）..."
+  PAUSED_XRAY="0"
+  if is_low_mem_host && service_is_running; then
+    info "低内存环境：安装依赖期间临时暂停 Xray 以避免内存不足（安装后自动恢复）..."
+    service_stop
+    PAUSED_XRAY="1"
+  fi
+  INSTALL_PY_OK="0"
   case "${OS_TYPE}" in
     alpine)
-      apk add --no-cache python3 || return 1
+      apk add --no-cache python3 && INSTALL_PY_OK="1" || INSTALL_PY_OK="0"
       ;;
     debian)
       export DEBIAN_FRONTEND=noninteractive
-      apt-get update -qq || return 1
-      apt-get install -y -qq python3 || return 1
+      apt-get update -qq && apt-get install -y -qq python3 && INSTALL_PY_OK="1" || INSTALL_PY_OK="0"
       ;;
-    *) return 1 ;;
   esac
+  if [ "${PAUSED_XRAY}" = "1" ]; then
+    service_start >/dev/null 2>&1 || true
+  fi
+  [ "${INSTALL_PY_OK}" = "1" ] || return 1
   PY_BIN="$(command -v python3 2>/dev/null || true)"
   [ -n "${PY_BIN}" ] && "${PY_BIN}" -c 'import sqlite3' >/dev/null 2>&1
 }
@@ -5760,23 +5803,25 @@ def fmt(b):
     b = float(b or 0)
     for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
         if b < 1024 or unit == "TiB":
-            return f"{b:.0f} B" if unit == "B" else f"{b:.2f} {unit}"
+            return "{:.0f} B".format(b) if unit == "B" else "{:.2f} {}".format(b, unit)
         b /= 1024
 d = json.load(sys.stdin)
 ce = "已开启" if d.get("collection_enabled") else "已关闭"
-print(f" 统计周期：{d.get(\"period_start\") or d.get(\"month\") or \"未知\"}")
-print(f" 整机总计：{fmt(d.get(\"total\", 0))}  （上传 {fmt(d.get(\"up\", 0))} / 下载 {fmt(d.get(\"down\", 0))}）")
-print(f" 更新时间：{d.get(\"updated_at\", \"暂无\")} | 定时采集：{ce}")
+period = d.get("period_start") or d.get("month") or "未知"
+updated = d.get("updated_at") or "暂无"
+print(" 统计周期：{}".format(period))
+print(" 整机总计：{}  （上传 {} / 下载 {}）".format(fmt(d.get("total", 0)), fmt(d.get("up", 0)), fmt(d.get("down", 0))))
+print(" 更新时间：{} | 定时采集：{}".format(updated, ce))
 ibs = d.get("inbounds") or {}
 if ibs:
     print("\n [按协议入站明细]")
     for k, v in sorted(ibs.items()):
-        print(f"   - {k:<18} 合计 {fmt(v.get(\"total\",0)):<12} (↑{fmt(v.get(\"up\",0))} / ↓{fmt(v.get(\"down\",0))})")
+        print("   - {:<18} 合计 {:<12} (↑{} / ↓{})".format(k, fmt(v.get("total", 0)), fmt(v.get("up", 0)), fmt(v.get("down", 0))))
 usrs = d.get("users") or {}
 if usrs:
     print("\n [按用户 (email) 明细]")
     for k, v in sorted(usrs.items()):
-        print(f"   - {k:<18} 合计 {fmt(v.get(\"total\",0)):<12} (↑{fmt(v.get(\"up\",0))} / ↓{fmt(v.get(\"down\",0))})")
+        print("   - {:<18} 合计 {:<12} (↑{} / ↓{})".format(k, fmt(v.get("total", 0)), fmt(v.get("up", 0)), fmt(v.get("down", 0))))
 ' 2>/dev/null
 }
 
@@ -6672,9 +6717,9 @@ manager_main() {
   while :; do
     MENU_RETURNED="0"
     manager_menu
-    read -r CHOICE || exit 0
-    [ -n "${CHOICE}" ] || continue
-    case "${CHOICE}" in
+    read -r MAIN_CHOICE || exit 0
+    [ -n "${MAIN_CHOICE}" ] || continue
+    case "${MAIN_CHOICE}" in
       1) show_quick_links ;;
       2) export_nodes_menu ;;
       3) manage_vless_menu ;;
@@ -6688,7 +6733,7 @@ manager_main() {
       0|q|Q) exit 0 ;;
       *) echo "无效选择。" ;;
     esac
-    case "${CHOICE}" in
+    case "${MAIN_CHOICE}" in
       2|3|4|5|6|7|8|9|10) ;;
       *)
         if [ "${MENU_RETURNED:-0}" = "1" ]; then

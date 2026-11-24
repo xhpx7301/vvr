@@ -303,6 +303,27 @@ cat "${CONFIG_FILE}"
             "AUTO_RESET_ENABLED='0'\n",
         )
 
+    def test_traffic_print_detailed_python311_safe(self):
+        sample = json.dumps({
+            "month": "2026-11",
+            "period_start": "2026-11-01 00:00",
+            "up": 1024,
+            "down": 2048,
+            "total": 3072,
+            "updated_at": "2026-11-24T10:00:00",
+            "collection_enabled": True,
+            "inbounds": {"vless-in-ipv4": {"up": 1024, "down": 2048, "total": 3072}},
+            "users": {"alice": {"up": 1024, "down": 2048, "total": 3072}},
+        })
+        output = self.run_shell(
+            "traffic_python_bin() { printf '%s' 'python'; }\n"
+            f"traffic_print_detailed '{sample}'\n"
+        )
+        self.assertIn("统计周期：2026-11-01 00:00", output)
+        self.assertIn("3.00 KiB", output)
+        self.assertIn("vless-in-ipv4", output)
+        self.assertIn("alice", output)
+
 
 if __name__ == "__main__":
     unittest.main()
