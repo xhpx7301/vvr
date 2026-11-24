@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dash and shellcheck
+        run: sudo apt-get update && sudo apt-get install -y dash shellcheck
+
+      - name: POSIX sh syntax check (dash)
+        run: |
+          for script in *.sh; do
+            echo "Checking syntax: ${script}"
+            dash -n "${script}"
+          done
+
+      - name: ShellCheck static analysis
+        run: shellcheck -S error *.sh
+
+      - name: Run unit tests
+        env:
+          VVR_TEST_SHELL: /bin/dash
+        run: python3 -m unittest discover -s tests -v

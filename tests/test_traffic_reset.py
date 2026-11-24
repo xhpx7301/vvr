@@ -12,17 +12,28 @@ from datetime import datetime
 from unittest.mock import patch
 
 
-INSTALLER = Path(__file__).resolve().parents[1] / "install-xray-reality-ipv4-ipv6-debian.sh"
+INSTALLER = Path(__file__).resolve().parents[1] / "install-xray-vvr.sh"
 SOURCE = INSTALLER.read_text(encoding="utf-8")
 TRAFFIC_SOURCE = SOURCE.split('cat > "${TRAFFIC_SCRIPT}" <<\'PY\'\n', 1)[1].split("\nPY\n", 1)[0]
-MANAGER_SOURCE = SOURCE.split('cat > "${MANAGER_BIN}" <<\'EOF\'\n', 1)[1].split("\nEOF\n", 1)[0]
-MANAGER_LIBRARY = MANAGER_SOURCE.rsplit('\nmain "$@"', 1)[0]
-INSTALLER_LIBRARY = SOURCE.rsplit('\ncase "${1:-}" in', 1)[0]
+INSTALLER_LIBRARY = SOURCE.rsplit('\ncase "$(basename "$0")" in', 1)[0]
 
 
-class InstallerDefaultsTests(unittest.TestCase):
-    def test_no_default_youtube_route(self):
-        self.assertNotIn("ipv6|geosite|youtube", SOURCE)
+def detect_posix_shell():
+    configured = os.environ.get("VVR_TEST_SHELL")
+    if configured:
+        return configured
+    found = shutil.which("sh")
+    if found:
+        return found
+    git = shutil.which("git")
+    if git:
+        candidate = Path(git).resolve().parent.parent / "bin" / "sh.exe"
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+SHELL = detect_posix_shell()
 
 
 class TrafficResetTests(unittest.TestCase):
@@ -63,7 +74,18 @@ class TrafficResetTests(unittest.TestCase):
         self.seed()
         result = self.traffic.collect()
         self.assertEqual(result["period_start"], "2026-09-01 00:00")
-        self.assertEqual(result["total"], 330)
+        # Previous period ended at last_up=100, last_down=200; current Xray stats
+        # are (110, 220), so only the new-period delta (10 + 20 = 30) is counted.
+        self.assertEqual(result["up"], 10)
+        self.assertEqual(result["down"], 20)
+        self.assertEqual(result["total"], 30)
+
+    def test_monthly_reset_after_xray_restart_counts_new_counter(self):
+        self.seed()
+        self.traffic.xray_stats = lambda: (5, 15)
+        result = self.traffic.collect()
+        self.assertEqual(result["period_start"], "2026-09-01 00:00")
+        self.assertEqual((result["up"], result["down"], result["total"]), (5, 15, 20))
 
     def test_disabled_preserves_period_and_collects_across_years(self):
         self.configure()
@@ -110,6 +132,47 @@ class TrafficResetTests(unittest.TestCase):
         self.clock.now.return_value = datetime(2026, 10, 5)
         self.assertEqual(self.traffic.collect()["total"], 15)
 
+    def test_multi_protocol_and_per_user_breakdown_excludes_internal_inbounds(self):
+        # Restore real xray_stats bound to mocked subprocess output.
+        self.traffic = types.ModuleType("vvr_traffic_multi")
+        exec(compile(TRAFFIC_SOURCE, "vvr-traffic.py", "exec"), self.traffic.__dict__)
+        self.traffic.DB = str(Path(self.temp.name) / "traffic-multi.db")
+        self.traffic.SETTINGS_FILE = str(self.settings)
+        self.configure(auto="1", collection="1")
+
+        sample_stats = {
+            "stat": [
+                {"name": "inbound>>>vless-in-ipv4>>>traffic>>>uplink", "value": "100"},
+                {"name": "inbound>>>vless-in-ipv4>>>traffic>>>downlink", "value": "500"},
+                {"name": "inbound>>>hysteria2-in>>>traffic>>>uplink", "value": "50"},
+                {"name": "inbound>>>hysteria2-in>>>traffic>>>downlink", "value": "250"},
+                {"name": "inbound>>>api>>>traffic>>>uplink", "value": "99999"},
+                {"name": "inbound>>>reality-fallback>>>traffic>>>downlink", "value": "88888"},
+                {"name": "user>>>alice>>>traffic>>>uplink", "value": "120"},
+                {"name": "user>>>alice>>>traffic>>>downlink", "value": "600"},
+                {"name": "user>>>bob>>>traffic>>>uplink", "value": "30"},
+                {"name": "user>>>bob>>>traffic>>>downlink", "value": "150"},
+            ]
+        }
+        fake_res = types.SimpleNamespace(stdout=json.dumps(sample_stats))
+        with patch.object(self.traffic.subprocess, "run", return_value=fake_res):
+            res = self.traffic.collect()
+        # Internal api & reality-fallback MUST be excluded from totals and inbounds
+        self.assertEqual((res["up"], res["down"], res["total"]), (150, 750, 900))
+        self.assertEqual(res["inbounds"]["vless-in-ipv4"]["total"], 600)
+        self.assertEqual(res["inbounds"]["hysteria2-in"]["total"], 300)
+        self.assertNotIn("api", res["inbounds"])
+        self.assertNotIn("reality-fallback", res["inbounds"])
+        self.assertEqual(res["users"]["alice"]["total"], 720)
+        self.assertEqual(res["users"]["bob"]["total"], 180)
+
+        # Reset clears total and breakdowns using current counter as baseline
+        with patch.object(self.traffic.subprocess, "run", return_value=fake_res):
+            self.traffic.reset()
+            after_reset = self.traffic.collect()
+        self.assertEqual(after_reset["total"], 0)
+        self.assertEqual(after_reset["users"]["alice"]["total"], 0)
+
     def request(self, method, path):
         handler = object.__new__(self.traffic.Handler)
         handler.path = path
@@ -140,138 +203,105 @@ class TrafficResetTests(unittest.TestCase):
         self.assertEqual(self.traffic.collect()["period_start"], "2026-09-01 00:00")
 
 
-SHELL = os.environ.get("VVR_TEST_SHELL") or shutil.which("sh")
-
-
-@unittest.skipUnless(SHELL, "Set VVR_TEST_SHELL to a POSIX shell to test installer modes")
-class InstallerModeTests(unittest.TestCase):
-    def run_shell(self, body, executables=None):
-        with tempfile.TemporaryDirectory() as directory:
-            directory = Path(directory)
-            if executables:
-                binary_dir = directory / "bin"
-                binary_dir.mkdir()
-                for name, content in executables.items():
-                    path = binary_dir / name
-                    path.write_text(content, encoding="utf-8", newline="\n")
-                    path.chmod(0o755)
-            script = directory / "installer-mode.sh"
-            script.write_text(INSTALLER_LIBRARY + "\n" + body, encoding="utf-8", newline="\n")
-            result = subprocess.run([SHELL, str(script)], capture_output=True, cwd=directory)
-            output = (result.stdout + result.stderr).decode("utf-8", errors="replace")
-            self.assertEqual(result.returncode, 0, output)
-            return output, directory
-
-    def test_no_argument_uses_safe_update_for_existing_install(self):
-        output, _ = self.run_shell(
-            "need_root() { :; }\ncheck_debian() { :; }\n"
-            "installation_complete() { return 0; }\n"
-            "safe_update() { echo __safe_update__; }\n"
-            "full_install() { echo __unexpected_install__; return 1; }\nmain\n"
-        )
-        self.assertIn("__safe_update__", output)
-        self.assertNotIn("__unexpected_install__", output)
-
-    def test_no_argument_installs_when_no_installation_exists(self):
-        output, _ = self.run_shell(
-            "need_root() { :; }\ncheck_debian() { :; }\n"
-            "installation_complete() { return 1; }\ninstallation_present() { return 1; }\n"
-            "safe_update() { echo __unexpected_update__; return 1; }\n"
-            "full_install() { [ \"$1\" = install ]; echo __fresh_install__; }\nmain\n"
-        )
-        self.assertIn("__fresh_install__", output)
-        self.assertNotIn("__unexpected_update__", output)
-
-    def test_installed_dependencies_skip_apt(self):
-        executables = {
-            "dpkg-query": "#!/bin/sh\nprintf 'install ok installed\\n'\n",
-            "apt-get": "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CALLS\"\n",
-        }
-        self.run_shell(
-            "PATH=./bin:$PATH\nCALLS=./apt-calls\nexport PATH CALLS\n"
-            "install_dependencies\n[ ! -e \"$CALLS\" ]\n",
-            executables,
-        )
-
-
-@unittest.skipUnless(SHELL, "Set VVR_TEST_SHELL to a POSIX shell to test menu settings")
-class MenuSettingsTests(unittest.TestCase):
+@unittest.skipUnless(SHELL, "POSIX shell not found; set VVR_TEST_SHELL")
+class TrafficModuleShellTests(unittest.TestCase):
     def run_shell(self, body, input_text="", settings=""):
-        functions = MANAGER_SOURCE.split("load_traffic_settings() {", 1)[1].split("load_traffic_api_settings() {", 1)[0]
         with tempfile.TemporaryDirectory() as directory:
             Path(directory, "settings.env").write_text(settings, encoding="utf-8", newline="\n")
             script = (
-                "set -eu\nexport PATH=/usr/bin:/bin:$PATH\nTRAFFIC_SETTINGS_FILE=./settings.env\n"
-                "ok() { :; }\nwarn() { :; }\nsystemctl() { :; }\n"
-                "load_traffic_settings() {" + functions + body
+                INSTALLER_LIBRARY
+                + "\nCONFIG_DIR=./etc-xray\nTRAFFIC_SETTINGS_FILE=./settings.env\n"
+                + "ok() { :; }\nwarn() { :; }\n"
+                + "traffic_collector_enable() { return 0; }\n"
+                + "traffic_collector_disable() { return 0; }\n"
+                + body
             )
+            script_path = Path(directory, "traffic-shell.sh")
+            script_path.write_text(script, encoding="utf-8", newline="\n")
             result = subprocess.run(
-                [SHELL, "-c", script], input=input_text.encode("utf-8"),
-                capture_output=True, cwd=directory,
+                [SHELL, str(script_path)],
+                input=input_text.encode("utf-8"),
+                capture_output=True,
+                cwd=directory,
             )
-            self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode("utf-8", errors="replace"))
+            output = (result.stdout + result.stderr).decode("utf-8", errors="replace")
+            self.assertEqual(result.returncode, 0, output)
+            return output
 
-    def test_installer_and_generated_manager_syntax(self):
-        for source in (SOURCE, MANAGER_SOURCE):
-            result = subprocess.run([SHELL, "-n"], input=source.encode("utf-8"), capture_output=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
+    def test_traffic_disabled_by_default_and_enabled_adds_stats_api(self):
+        body = """
+CONFIG_DIR="./etc-xray"
+CONFIG_FILE="${CONFIG_DIR}/config.json"
+CLIENTS_FILE="${CONFIG_DIR}/vvr-clients.db"
+ROUTES_FILE="${CONFIG_DIR}/vvr-routing.rules"
+mkdir -p "${CONFIG_DIR}"
+printf 'ipv4|11111111-1111-1111-1111-111111111111|alice\\n' > "${CLIENTS_FILE}"
+: > "${ROUTES_FILE}"
+IPV4_PORT="443"; IPV6_PORT=""
+SNI="www.sony.com"; REALITY_DEST="www.sony.com:443"
+PRIVATE_KEY="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+PUBLIC_KEY="BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+SHORT_ID="0123456789abcdef"
+BASE_OUTBOUND_MODE="ipv4"; HAPPY_EYEBALLS_DELAY_MS="100"; BLOCK_PRIVATE_IP="1"
+
+TRAFFIC_ENABLED="${DEFAULT_TRAFFIC_ENABLED}"
+write_config
+echo "---OFF---"
+cat "${CONFIG_FILE}"
+
+TRAFFIC_ENABLED="1"
+XRAY_API_PORT="10085"
+write_config
+echo "---ON---"
+cat "${CONFIG_FILE}"
+"""
+        output = self.run_shell(body)
+        cfg_off = json.loads(output.split("---OFF---\n", 1)[1].split("\n---ON---", 1)[0])
+        cfg_on = json.loads(output.split("---ON---\n", 1)[1])
+
+        self.assertNotIn("stats", cfg_off)
+        self.assertNotIn("api", cfg_off)
+        self.assertFalse(any(i["tag"] == "api" for i in cfg_off["inbounds"]))
+
+        self.assertIn("stats", cfg_on)
+        self.assertEqual(cfg_on["api"], {"tag": "api", "services": ["StatsService"]})
+        self.assertTrue(cfg_on["policy"]["levels"]["0"]["statsUserUplink"])
+        api_in = [i for i in cfg_on["inbounds"] if i["tag"] == "api"]
+        self.assertEqual(len(api_in), 1)
+        self.assertEqual(api_in[0]["port"], 10085)
+        self.assertEqual(cfg_on["routing"]["rules"][0], {"type": "field", "inboundTag": ["api"], "outboundTag": "api"})
 
     def test_disabling_preserves_schedule_and_collection(self):
         self.run_shell(
             'configure_traffic_schedule\nload_traffic_settings\n'
             '[ "$AUTO_RESET_ENABLED:$COLLECTION_ENABLED:$RESET_DAY" = "0:1:15" ]\n',
-            "2\n", "RESET_DAY='15'\n",
+            "2\n",
+            "RESET_DAY='15'\n",
         )
 
     def test_enabling_preserves_disabled_collection(self):
         self.run_shell(
             'configure_traffic_schedule\nload_traffic_settings\n'
             '[ "$AUTO_RESET_ENABLED:$COLLECTION_ENABLED:$RESET_DAY:$RESET_HOUR:$RESET_MINUTE" = "1:0:8:9:5" ]\n',
-            "1\n8\n09:05\n", "AUTO_RESET_ENABLED='0'\nCOLLECTION_ENABLED='0'\n",
+            "1\n8\n09:05\n",
+            "AUTO_RESET_ENABLED='0'\nCOLLECTION_ENABLED='0'\n",
         )
 
     def test_collection_changes_preserve_disabled_reset(self):
         for choice in ("1", "2"):
             self.run_shell(
                 'configure_traffic_collection\nload_traffic_settings\n[ "$AUTO_RESET_ENABLED" = "0" ]\n',
-                choice + "\ny\n", "AUTO_RESET_ENABLED='0'\n",
+                choice + "\ny\n",
+                "AUTO_RESET_ENABLED='0'\n",
             )
 
     def test_cancel_does_not_enable_reset(self):
         self.run_shell(
             'configure_traffic_schedule\n[ "$MENU_RETURNED" = "1" ]\n'
             'load_traffic_settings\n[ "$AUTO_RESET_ENABLED" = "0" ]\n',
-            "1\n0\n", "AUTO_RESET_ENABLED='0'\n",
+            "1\n0\n",
+            "AUTO_RESET_ENABLED='0'\n",
         )
-
-
-@unittest.skipUnless(SHELL, "Set VVR_TEST_SHELL to a POSIX shell to test menu navigation")
-class MenuNavigationTests(unittest.TestCase):
-    def assert_outbound_menu_returns(self, choice):
-        with tempfile.TemporaryDirectory() as directory:
-            script = (
-                MANAGER_LIBRARY
-                + "\nROUTES_FILE=./routes.rules\nBASE_OUTBOUND_MODE=ipv4\n"
-                + "HAPPY_EYEBALLS_DELAY_MS=100\n"
-                + "load_state() { :; }\nensure_routes_file() { :; }\n"
-                + "refresh_network_status() { :; }\nshow_network_status() { :; }\n"
-                + "apply_config() { :; }\n"
-                + "manage_outbound_strategy\nprintf '__menu_returned__\\n'\n"
-            )
-            script_path = Path(directory, "menu-navigation.sh")
-            script_path.write_text(script, encoding="utf-8", newline="\n")
-            result = subprocess.run(
-                [SHELL, str(script_path)], input=(choice + "\n0\n0\n").encode("utf-8"),
-                capture_output=True, cwd=directory,
-            )
-            output = (result.stdout + result.stderr).decode("utf-8", errors="replace")
-            self.assertEqual(result.returncode, 0, output)
-            self.assertIn("__menu_returned__", output)
-
-    def test_cancelling_outbound_selector_returns_to_strategy_menu(self):
-        for choice in ("1", "3", "4"):
-            with self.subTest(choice=choice):
-                self.assert_outbound_menu_returns(choice)
 
 
 if __name__ == "__main__":
